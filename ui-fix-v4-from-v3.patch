@@ -1,0 +1,1285 @@
+--- a/lib/layout.ts
++++ b/lib/layout.ts
+@@ -1,13 +1,16 @@
+ /**
+- * 河流布局算法 v2 — 修复下游 overlap + 长标签
++ * 河流布局算法 v4 — 增加 collapsedIds + enabledFamilies 过滤
+  *
+- * 关键改动 vs v1：
+- *  - 每个 leaf 按 **峰值厚度** 预留垂直「车道」（min 7px / living, 5px / historical, + gap）
+- *  - SVG **总高度动态计算** — 不再固定容器高度，让所有 ribbon 都有空间，容器 overflow-y scroll
+- *  - ribbon 厚度有下限（living = 4px, historical = 2px），保证 hover 可点
+- *  - 后期 collision 检测：扫一遍所有 ribbon，发现 yStart 间距 < laneHeight 的对手就下推
++ * v4 改动：
++ *  - 接受 `collapsedIds: Set<string>` —— 该节点的所有 descendants 隐藏，本节点变成 visible leaf
++ *  - 接受 `enabledFamilies: Set<FamilyId>` —— 整个语系隐藏
++ *  - totalHeight 根据 visible leaves 动态计算（filter 后变小）
++ *  - 返回 `collapsibleNodes` —— shown 节点中有 visible children 的，给 UI 渲染三角图标
+  *
+- * 调用方拿到 `{ ribbons, totalHeight }`，把 totalHeight 设给 SVG 的 height 属性。
++ * 保留 v3：
++ *  - 每个 leaf 按峰值厚度 + 22/16 min lane + 18 laneGap + 48 familyGap
++ *  - ribbon 厚度按使用人数算（不变）
++ *  - X 轴分段线性，6 段
+  */
+ 
+ import { LANGUAGES, LANGUAGE_BY_ID, speakerAt } from "./data";
+@@ -18,21 +21,30 @@
+   name: { zh: string; en: string };
+   family: FamilyId;
+   branch?: string;
+-  path: string;          // SVG path d
+-  centerPath: string;    // 中线 path（用于 label / hover）
++  path: string;
++  centerPath: string;
+   status: string;
+   born: number;
+   died: number;
+-  yStart: number;        // 出生 y
+-  yEnd: number;          // 死亡 / 现在 y
++  yStart: number;
++  yEnd: number;
+   parent?: string;
+-  /** 当前在 modern 的厚度（用于 hit 区域判断） */
+   modernThickness: number;
++  /** 是否可折叠（shown 且有 visible children） */
++  collapsible: boolean;
++  /** 当前是否被折叠 */
++  collapsed: boolean;
++  /** descendants 数（仅 visible） */
++  descendantCount: number;
+ }
+ 
+ export interface LayoutResult {
+   ribbons: LaneRibbon[];
+   totalHeight: number;
++  /** 当前 visible leaf 数 */
++  visibleLeafCount: number;
++  /** 当前 collapsed 数 */
++  collapsedCount: number;
+ }
+ 
+ export interface LayoutOptions {
+@@ -43,15 +55,13 @@
+   marginBottom: number;
+   xScale: (year: number) => number;
+   thickness: (speakers: number) => number;
+-  /** 最小厚度（living），默认 7 */
++  collapsedIds?: Set<string>;
++  enabledFamilies?: Set<FamilyId>;
+   minThickLiving?: number;
+-  /** 最小厚度（historical / extinct），默认 5 */
+   minThickHistorical?: number;
+-  /** Lane 间隔 gap，默认 3 */
+   laneGap?: number;
+ }
+ 
+-// X 轴：分段线性
+ const SEGMENTS: [number, number, number][] = [
+   [-6500, -2500, 0.18],
+   [-2500, -200,  0.22],
+@@ -85,6 +95,17 @@
+ 
+ export const X_TICKS: number[] = [-6000, -4000, -3000, -2000, -1000, -500, 0, 500, 1000, 1500, 1800, 2000];
+ 
++export const EVENTS: { year: number; zh: string; en: string }[] = [
++  { year: -3200, zh: "楔形文字", en: "Cuneiform" },
++  { year: -1250, zh: "甲骨文", en: "Oracle Bones" },
++  { year: -800, zh: "字母诞生", en: "Alphabet" },
++  { year: -221, zh: "秦统一文字", en: "Qin Script" },
++  { year: 632, zh: "阿语扩张", en: "Arabic Expansion" },
++  { year: 1066, zh: "诺曼征服", en: "Norman Conquest" },
++  { year: 1492, zh: "美洲开拓", en: "Atlantic Era" },
++  { year: 1928, zh: "土耳其拉丁化", en: "Turkish Latinization" },
++];
++
+ const FAMILY_ORDER: FamilyId[] = ["ie", "afro", "dr", "turk", "st", "isolate", "an", "ng"];
+ const BRANCH_ORDER: Record<string, number> = {
+   "celtic": 1, "germanic": 2, "north-germanic": 2.1, "west-germanic": 2.2, "east-germanic": 2.3,
+@@ -102,17 +123,20 @@
+ 
+ export function computeLayout(opts: LayoutOptions): LayoutResult {
+   const {
+-    width,
+     marginTop,
+     marginBottom,
+     xScale,
+     thickness,
+-    minThickLiving = 22,        // v3: 7 → 22（每条 living 至少 22px 车道）
+-    minThickHistorical = 16,    // v3: 5 → 16
+-    laneGap = 18,               // v3: 3 → 18（车道间空白大幅加大）
++    collapsedIds = new Set<string>(),
++    enabledFamilies,
++    minThickLiving = 22,
++    minThickHistorical = 16,
++    laneGap = 18,
+   } = opts;
+ 
+-  // 1. Build children map
++  const FAMILY_BREAK_GAP = 48;
++
++  // Build children map
+   const childrenOf = new Map<string, string[]>();
+   for (const l of LANGUAGES) {
+     if (l.parent) {
+@@ -121,23 +145,51 @@
+     }
+   }
+ 
+-  function isLeaf(id: string) {
+-    return !childrenOf.has(id) || childrenOf.get(id)!.length === 0;
++  // --- v4: filter logic ---
++  function familyEnabled(f: FamilyId): boolean {
++    return enabledFamilies ? enabledFamilies.has(f) : true;
++  }
++
++  function isAncestorCollapsed(id: string): boolean {
++    let cur = LANGUAGE_BY_ID.get(id);
++    while (cur?.parent) {
++      if (collapsedIds.has(cur.parent)) return true;
++      cur = LANGUAGE_BY_ID.get(cur.parent);
++    }
++    return false;
+   }
+ 
+-  const leaves = LANGUAGES.filter((l) => isLeaf(l.id));
++  // shown = family enabled AND no ancestor is collapsed
++  const shown = new Set<string>();
++  for (const l of LANGUAGES) {
++    if (familyEnabled(l.family) && !isAncestorCollapsed(l.id)) {
++      shown.add(l.id);
++    }
++  }
++
++  // visible leaf: shown AND (collapsed itself OR no shown children)
++  function isVisibleLeaf(id: string): boolean {
++    if (!shown.has(id)) return false;
++    if (collapsedIds.has(id)) return true;
++    const kids = childrenOf.get(id) ?? [];
++    return !kids.some((k) => shown.has(k));
++  }
++
++  const visibleLeaves = LANGUAGES.filter((l) => isVisibleLeaf(l.id));
++  if (visibleLeaves.length === 0) {
++    return { ribbons: [], totalHeight: marginTop + marginBottom + 200, visibleLeafCount: 0, collapsedCount: collapsedIds.size };
++  }
+ 
+-  // 2. 排序：语系 → 分支 → 经度
+   const sortKey = (l: LanguageNode): number => {
+     const fOrder = FAMILY_ORDER.indexOf(l.family);
+     const bOrder = BRANCH_ORDER[l.branch ?? ""] ?? 99;
+     return fOrder * 1000 + bOrder * 10 + l.geo.lon / 360;
+   };
+-  leaves.sort((a, b) => sortKey(a) - sortKey(b));
++  visibleLeaves.sort((a, b) => sortKey(a) - sortKey(b));
+ 
+-  // 3. 给每个 leaf 计算「车道高度」 = 峰值厚度 + gap
++  // Lane heights — only for visible leaves
+   const laneHeight = new Map<string, number>();
+-  for (const leaf of leaves) {
++  for (const leaf of visibleLeaves) {
+     const peak = Math.max(
+       speakerAt(leaf, 2025),
+       speakerAt(leaf, leaf.died ?? 2025),
+@@ -149,12 +201,11 @@
+     laneHeight.set(leaf.id, h + laneGap);
+   }
+ 
+-  // 4. 垂直堆叠 — 语系之间额外 gap
+-  const FAMILY_BREAK_GAP = 48;   // v3: 8 → 48（语系之间留出明显分隔）
++  // Stack vertically
+   const yOf = new Map<string, number>();
+   let acc = marginTop;
+   let prevFamily: FamilyId | null = null;
+-  for (const leaf of leaves) {
++  for (const leaf of visibleLeaves) {
+     if (prevFamily && prevFamily !== leaf.family) acc += FAMILY_BREAK_GAP;
+     const h = laneHeight.get(leaf.id)!;
+     yOf.set(leaf.id, acc + h / 2);
+@@ -163,35 +214,42 @@
+   }
+   const totalHeight = Math.ceil(acc + marginBottom);
+ 
+-  // 5. 内部节点 Y = descendants 加权重心（按 modern speakers）
+-  function descLeaves(id: string): LanguageNode[] {
+-    if (isLeaf(id)) return [LANGUAGE_BY_ID.get(id)!];
++  // Internal shown nodes: Y = weighted centroid of visible descendants
++  function descVisibleLeaves(id: string): LanguageNode[] {
++    if (isVisibleLeaf(id)) return [LANGUAGE_BY_ID.get(id)!];
+     const out: LanguageNode[] = [];
+-    for (const cid of childrenOf.get(id) ?? []) out.push(...descLeaves(cid));
++    for (const cid of childrenOf.get(id) ?? []) {
++      if (shown.has(cid)) out.push(...descVisibleLeaves(cid));
++    }
+     return out;
+   }
++
+   for (const l of LANGUAGES) {
+-    if (isLeaf(l.id)) continue;
+-    const descs = descLeaves(l.id);
+-    if (descs.length === 0) { yOf.set(l.id, marginTop + (totalHeight - marginTop - marginBottom) / 2); continue; }
++    if (!shown.has(l.id)) continue;
++    if (yOf.has(l.id)) continue; // it's a visible leaf, Y already set
++    const descs = descVisibleLeaves(l.id);
++    if (descs.length === 0) {
++      yOf.set(l.id, marginTop + (totalHeight - marginTop - marginBottom) / 2);
++      continue;
++    }
+     let sumY = 0, sumW = 0;
+     for (const d of descs) {
+-      const finalY = yOf.get(d.id)!;
+       const w = Math.log(Math.max(speakerAt(d, 2025), 1) + 1);
+-      sumY += finalY * w;
++      sumY += yOf.get(d.id)! * w;
+       sumW += w;
+     }
+     yOf.set(l.id, sumW > 0 ? sumY / sumW : marginTop + totalHeight / 2);
+   }
+ 
+-  // 6. 生成 ribbons
++  // Generate ribbons — only for shown nodes
+   const STEP = 40;
+   const ribbons: LaneRibbon[] = [];
+   for (const l of LANGUAGES) {
++    if (!shown.has(l.id)) continue;
+     const born = l.born;
+     const died = l.died ?? 2026;
+     const startY = yOf.get(l.id)!;
+-    const parentY = l.parent ? (yOf.get(l.parent) ?? startY) : startY;
++    const parentY = l.parent && yOf.has(l.parent) ? yOf.get(l.parent)! : startY;
+ 
+     const isLiving = l.status === "living";
+     const isRecon = l.status === "reconstructed";
+@@ -202,19 +260,17 @@
+ 
+     for (let y = born; y <= died; y += STEP) {
+       let cy = startY;
+-      if (l.parent && y < born + TRANSITION) {
++      if (l.parent && yOf.has(l.parent) && y < born + TRANSITION) {
+         const t = (y - born) / TRANSITION;
+         const ts = 0.5 - 0.5 * Math.cos(Math.PI * t);
+         cy = parentY + (startY - parentY) * ts;
+       }
+       const count = speakerAt(l, y);
+       let w = Math.max(minW, thickness(count));
+-      // taper start
+       if (y < born + TRANSITION) {
+         const t = (y - born) / TRANSITION;
+         w *= Math.max(0.05, t);
+       }
+-      // taper end (only for died / extinct)
+       if (l.died && y > died - TRANSITION) {
+         const t = (died - y) / TRANSITION;
+         w *= Math.max(0.05, t);
+@@ -228,7 +284,6 @@
+       samples.push({ year: died, y: cy, w });
+     }
+ 
+-    // build path
+     const top: [number, number][] = samples.map((s) => [xScale(s.year), s.y - s.w / 2]);
+     const bot: [number, number][] = samples.map((s) => [xScale(s.year), s.y + s.w / 2]);
+ 
+@@ -258,6 +313,19 @@
+       centerPath += `C ${cx},${py} ${cx},${y} ${x},${y} `;
+     }
+ 
++    // collapsible: 节点有 children 且至少一个 child 在 shown 集合
++    const kids = childrenOf.get(l.id) ?? [];
++    const collapsible = kids.length > 0;
++    const collapsed = collapsedIds.has(l.id);
++
++    // descendants count（只计 visible 路径 — 若 collapsed，count = 全部后代）
++    function countAllDesc(id: string): number {
++      const k = childrenOf.get(id) ?? [];
++      let n = k.length;
++      for (const cid of k) n += countAllDesc(cid);
++      return n;
++    }
++
+     ribbons.push({
+       id: l.id,
+       name: l.name,
+@@ -272,15 +340,21 @@
+       yEnd: startY,
+       parent: l.parent,
+       modernThickness: samples[samples.length - 1].w,
++      collapsible,
++      collapsed,
++      descendantCount: countAllDesc(l.id),
+     });
+   }
+ 
+-  return { ribbons, totalHeight };
++  return {
++    ribbons,
++    totalHeight,
++    visibleLeafCount: visibleLeaves.length,
++    collapsedCount: collapsedIds.size,
++  };
+ }
+ 
+-// 默认厚度函数：log10 scale
+ export function defaultThickness(speakers: number): number {
+   const v = Math.log10(Math.max(speakers, 100));
+-  // log10(100)=2 → 0.6;  log10(1.5B)=9.18 → ~32
+   return Math.max(0.6, (v - 2) * 4.5);
+ }
+--- a/app/components/RiverChart.tsx
++++ b/app/components/RiverChart.tsx
+@@ -1,13 +1,20 @@
+ "use client";
+ import { useMemo } from "react";
+ import { LANGUAGES, LANGUAGE_BY_ID, CONTACTS } from "@/lib/data";
+-import { computeLayout, makeXScale, defaultThickness, X_TICKS, type LaneRibbon } from "@/lib/layout";
++import {
++  computeLayout,
++  makeXScale,
++  defaultThickness,
++  X_TICKS,
++  EVENTS,
++  type LaneRibbon,
++} from "@/lib/layout";
+ import { FAMILY_META, type FamilyId } from "@/lib/types";
+ 
+ interface Props {
+   width: number;
+-  /** 最小可视高度（容器高度），SVG 自身高度会动态变大、容器 overflow-y scroll */
+-  minHeight: number;
++  /** Container 高度（用来设 max-height for scroll） */
++  containerHeight: number;
+   isMobile?: boolean;
+   hoveredId: string | null;
+   selectedId: string | null;
+@@ -15,46 +22,44 @@
+   setSelectedId: (id: string | null) => void;
+   showContacts: boolean;
+   enabledFamilies: Set<FamilyId>;
++  collapsedIds: Set<string>;
++  toggleCollapse: (id: string) => void;
+ }
+ 
+-// v3: 左侧标签栏更宽（桌面 220，手机 140），右侧 200 容纳长 living-language 名字
+-const DESKTOP_MARGIN = { top: 40, right: 200, bottom: 70, left: 220 };
+-const MOBILE_MARGIN  = { top: 40, right: 170, bottom: 70, left: 140 };
+-
+-const EVENTS: { year: number; label: { zh: string; en: string } }[] = [
+-  { year: -3200, label: { zh: "楔形文字", en: "Cuneiform" } },
+-  { year: -1250, label: { zh: "甲骨文", en: "Oracle Bones" } },
+-  { year: -800, label: { zh: "字母诞生", en: "Alphabet" } },
+-  { year: -221, label: { zh: "秦统一文字", en: "Qin Script" } },
+-  { year: 632, label: { zh: "阿语扩张", en: "Arabic Expansion" } },
+-  { year: 1066, label: { zh: "诺曼征服", en: "Norman Conquest" } },
+-  { year: 1492, label: { zh: "美洲开拓", en: "Atlantic Era" } },
+-  { year: 1928, label: { zh: "土耳其拉丁化", en: "Turkish Latinization" } },
+-];
++// v3/v4 margins
++const DESKTOP_MARGIN = { top: 4, right: 200, bottom: 4, left: 220 };
++const MOBILE_MARGIN  = { top: 4, right: 170, bottom: 4, left: 140 };
++const HEADER_H = 56;  // sticky top bar
++const FOOTER_H = 48;  // sticky bottom bar
+ 
+-// 把过长的中文名拆 2 行（按字数）
+ function splitLongName(name: string, max = 6): string[] {
+   if (name.length <= max) return [name];
+-  // 找一个合理切点（偏中间、汉字处）
+   const cut = Math.ceil(name.length / 2);
+   return [name.slice(0, cut), name.slice(cut)];
+ }
+ 
+-export default function RiverChart({
+-  width,
+-  minHeight,
+-  isMobile = false,
+-  hoveredId,
+-  selectedId,
+-  setHoveredId,
+-  setSelectedId,
+-  showContacts,
+-  enabledFamilies,
+-}: Props) {
++export default function RiverChart(props: Props) {
++  const {
++    width,
++    containerHeight,
++    isMobile = false,
++    hoveredId,
++    selectedId,
++    setHoveredId,
++    setSelectedId,
++    showContacts,
++    enabledFamilies,
++    collapsedIds,
++    toggleCollapse,
++  } = props;
++
+   const MARGIN = isMobile ? MOBILE_MARGIN : DESKTOP_MARGIN;
+-  const xScale = useMemo(() => makeXScale(width, MARGIN.left, MARGIN.right), [width, MARGIN.left, MARGIN.right]);
++  const xScale = useMemo(
++    () => makeXScale(width, MARGIN.left, MARGIN.right),
++    [width, MARGIN.left, MARGIN.right]
++  );
+ 
+-  const { ribbons, totalHeight } = useMemo(
++  const { ribbons, totalHeight, visibleLeafCount, collapsedCount } = useMemo(
+     () =>
+       computeLayout({
+         width,
+@@ -64,16 +69,22 @@
+         marginBottom: MARGIN.bottom,
+         xScale,
+         thickness: defaultThickness,
++        collapsedIds,
++        enabledFamilies,
+       }),
+-    [width, xScale, MARGIN.left, MARGIN.right, MARGIN.top, MARGIN.bottom]
++    [width, xScale, MARGIN.left, MARGIN.right, MARGIN.top, MARGIN.bottom, collapsedIds, enabledFamilies]
+   );
+ 
+-  // SVG 实际高度 = max(容器最小高度, 计算出的总高度)
+-  const svgHeight = Math.max(minHeight, totalHeight);
+-
+-  // 部署调试用 — 浏览器 console 能看到当前布局尺寸
+   if (typeof window !== "undefined") {
+-    (window as any).__riverLayout = { width, totalHeight, svgHeight, ribbonCount: ribbons.length, MARGIN };
++    (window as any).__riverLayout = {
++      version: "v4",
++      width,
++      totalHeight,
++      ribbonCount: ribbons.length,
++      visibleLeafCount,
++      collapsedCount,
++      MARGIN,
++    };
+   }
+ 
+   const ribbonsById = useMemo(() => {
+@@ -107,303 +118,389 @@
+     return FAMILY_META[f].color;
+   }
+ 
++  // Scroll-area height (container - header - footer)
++  const scrollMaxH = Math.max(120, containerHeight - HEADER_H - FOOTER_H);
++
+   return (
+-    <svg
+-      width={width}
+-      height={svgHeight}
+-      viewBox={`0 0 ${width} ${svgHeight}`}
+-      className="select-none block"
++    <div
++      className="w-full h-full flex flex-col bg-cream-50"
++      style={{ minWidth: width, height: containerHeight }}
+     >
+-      <defs>
+-        <linearGradient id="bg-gradient" x1="0" y1="0" x2="1" y2="0">
+-          <stop offset="0" stopColor="#F5EFE2" stopOpacity="0.4" />
+-          <stop offset="1" stopColor="#FBF8F1" stopOpacity="0" />
+-        </linearGradient>
+-        {Object.entries(FAMILY_META).map(([key, meta]) => (
+-          <linearGradient key={key} id={`grad-${key}`} x1="0" y1="0" x2="1" y2="0">
+-            <stop offset="0" stopColor={meta.color} stopOpacity="0.5" />
+-            <stop offset="1" stopColor={meta.color} stopOpacity="0.9" />
+-          </linearGradient>
+-        ))}
+-      </defs>
+-
+-      {/* 底色 */}
+-      <rect
+-        x={MARGIN.left}
+-        y={MARGIN.top}
+-        width={width - MARGIN.left - MARGIN.right}
+-        height={svgHeight - MARGIN.top - MARGIN.bottom}
+-        fill="url(#bg-gradient)"
+-      />
+-
+-      {/* 历史事件竖线 */}
+-      <g className="events">
+-        {EVENTS.map((e) => (
+-          <g key={e.year}>
+-            <line
+-              x1={xScale(e.year)}
+-              x2={xScale(e.year)}
+-              y1={MARGIN.top}
+-              y2={svgHeight - MARGIN.bottom + 4}
+-              stroke="#C4A05A"
+-              strokeWidth={0.5}
+-              strokeDasharray="2 4"
+-              opacity={0.55}
+-            />
+-            <text
+-              x={xScale(e.year)}
+-              y={MARGIN.top - 12}
+-              textAnchor="middle"
+-              fontSize={10}
+-              fontFamily="'Cormorant Garamond', 'Noto Serif SC', serif"
+-              fill="#8A6A28"
+-              fontStyle="italic"
+-            >
+-              {e.label.zh}
+-            </text>
+-          </g>
+-        ))}
+-      </g>
+-
+-      {/* 河流 ribbons */}
+-      <g className="ribbons">
+-        {ribbons.map((r) => {
+-          if (!enabledFamilies.has(r.family)) return null;
+-          const isFocus = !focusIds || focusIds.has(r.id);
+-          const isReconstructed = r.status === "reconstructed";
+-          const isExtinct = r.status === "extinct" || r.status === "historical";
+-          return (
+-            <path
+-              key={r.id}
+-              d={r.path}
+-              className={`river cursor-pointer ${isFocus ? "" : "river-dim"} ${
+-                hoveredId === r.id || selectedId === r.id ? "river-highlight" : ""
+-              }`}
+-              fill={`url(#grad-${r.family})`}
+-              opacity={isReconstructed ? 0.45 : isExtinct ? 0.72 : 0.92}
+-              stroke={familyColor(r.family)}
+-              strokeWidth={selectedId === r.id ? 1.6 : 0.4}
+-              strokeOpacity={0.5}
+-              strokeDasharray={isReconstructed ? "3 3" : undefined}
+-              onMouseEnter={() => setHoveredId(r.id)}
+-              onMouseLeave={() => setHoveredId(null)}
+-              onClick={() => setSelectedId(selectedId === r.id ? null : r.id)}
+-            >
+-              <title>
+-                {r.name.zh} · {r.name.en}
+-              </title>
+-            </path>
+-          );
+-        })}
+-      </g>
+-
+-      {/* 借用虚线 */}
+-      {showContacts && (
+-        <g className="contacts">
+-          {CONTACTS.map((c) => {
+-            const src = ribbonsById.get(c.source);
+-            const tgt = ribbonsById.get(c.target);
+-            if (!src || !tgt) return null;
+-            if (!enabledFamilies.has(src.family) || !enabledFamilies.has(tgt.family)) return null;
+-            const x = xScale(c.year);
+-            const y1 = src.yStart;
+-            const y2 = tgt.yStart;
+-            const cx = x + 32;
+-            const isFocus = !focusIds || focusIds.has(c.source) || focusIds.has(c.target);
+-            return (
+-              <path
+-                key={c.id}
+-                d={`M ${x},${y1} C ${cx},${y1} ${cx},${y2} ${x + 2},${y2}`}
+-                className="contact-loan"
+-                fill="none"
+-                stroke="#8A6A28"
+-                strokeWidth={c.strength === 2 ? 1.2 : 0.7}
+-                opacity={isFocus ? 0.5 : 0.08}
++      {/* ============ STICKY TOP: Title + Events ============ */}
++      <div
++        className="shrink-0 bg-cream-50 border-b border-cream-200"
++        style={{ width, height: HEADER_H, position: "sticky", top: 0, zIndex: 30 }}
++      >
++        <svg width={width} height={HEADER_H}>
++          <text
++            x={MARGIN.left}
++            y={18}
++            fontSize={14}
++            fontFamily="'Cormorant Garamond', serif"
++            fontStyle="italic"
++            fill="#82282C"
++          >
++            从原始印欧语到现代世界 · From Proto-Languages to Today
++            <tspan fill="#A8853C" fontSize={10} dx={10}>
++              {ribbons.length} ribbons · {visibleLeafCount} languages
++              {collapsedCount > 0 ? ` · ${collapsedCount} branch${collapsedCount > 1 ? "es" : ""} collapsed` : ""}
++            </tspan>
++          </text>
++          {EVENTS.map((e) => (
++            <g key={e.year}>
++              <line
++                x1={xScale(e.year)}
++                x2={xScale(e.year)}
++                y1={HEADER_H - 22}
++                y2={HEADER_H}
++                stroke="#C4A05A"
++                strokeWidth={0.6}
++                opacity={0.7}
+               />
+-            );
+-          })}
+-        </g>
+-      )}
+-
+-      {/* 语言标签 — 右端 living / inline 灭绝 */}
+-      <g className="labels">
+-        {ribbons.map((r) => {
+-          if (!enabledFamilies.has(r.family)) return null;
+-          if (r.status === "reconstructed") {
+-            // 拟构语：左端 italic 标
+-            return (
+               <text
+-                key={r.id}
+-                x={xScale(r.born) + 4}
+-                y={r.yStart}
+-                fontSize={9}
+-                fontStyle="italic"
++                x={xScale(e.year)}
++                y={HEADER_H - 26}
++                textAnchor="middle"
++                fontSize={10}
+                 fontFamily="'Cormorant Garamond', 'Noto Serif SC', serif"
+-                fill="#5C5247"
+-                opacity={focusIds && !focusIds.has(r.id) ? 0.18 : 0.85}
+-                dominantBaseline="middle"
+-                pointerEvents="none"
+-              >
+-                * {r.name.zh}
+-              </text>
+-            );
+-          }
+-          if (r.died < 2020) {
+-            // 灭绝语言：标在 died 处（inline）
+-            return (
+-              <text
+-                key={r.id}
+-                x={xScale(r.died) + 4}
+-                y={r.yStart}
+-                fontSize={9.5}
+-                fontFamily="'Noto Serif SC', 'Cormorant Garamond', serif"
++                fill="#8A6A28"
+                 fontStyle="italic"
+-                fill="#5C5247"
+-                opacity={focusIds && !focusIds.has(r.id) ? 0.15 : 0.78}
+-                dominantBaseline="middle"
+-                pointerEvents="none"
+               >
+-                † {r.name.zh}
++                {e.zh}
+               </text>
+-            );
+-          }
+-          // v3: 桌面 right margin 200 单行装得下大多数名字，不再硬拆 2 行；mobile 还按 6 字拆
+-          const lines = isMobile ? splitLongName(r.name.zh, 6) : [r.name.zh];
+-          const isHighlighted = hoveredId === r.id || selectedId === r.id;
+-          return (
+-            <g key={r.id}>
+-              {lines.map((line, i) => (
+-                <text
+-                  key={i}
+-                  x={width - MARGIN.right + 8}
+-                  y={r.yStart + (i - (lines.length - 1) / 2) * 13}
+-                  fontSize={isHighlighted ? 14 : 12}   /* v3: 10→12 default, 11.5→14 highlight */
+-                  fontFamily="'Noto Serif SC', 'Cormorant Garamond', serif"
+-                  fill={isHighlighted ? familyColor(r.family) : "#3A332A"}
+-                  fontWeight={isHighlighted ? 600 : 400}
+-                  opacity={focusIds && !focusIds.has(r.id) ? 0.18 : 0.95}
+-                  dominantBaseline="middle"
+-                  pointerEvents="none"
+-                >
+-                  {line}
+-                </text>
+-              ))}
+-              {/* 英文副名（hover/select 时显示） */}
+-              {isHighlighted && (
+-                <text
+-                  x={width - MARGIN.right + 8}
+-                  y={r.yStart + ((lines.length) / 2) * 13 + 4}
+-                  fontSize={10}
+-                  fontStyle="italic"
+-                  fontFamily="'Cormorant Garamond', serif"
+-                  fill={familyColor(r.family)}
+-                  opacity={0.75}
+-                  dominantBaseline="middle"
+-                  pointerEvents="none"
++            </g>
++          ))}
++        </svg>
++      </div>
++
++      {/* ============ MIDDLE: Scrollable ribbons SVG ============ */}
++      <div
++        className="overflow-y-auto overflow-x-hidden"
++        style={{
++          width,
++          maxHeight: scrollMaxH,
++          transition: "max-height 280ms ease",
++        }}
++      >
++        <svg
++          width={width}
++          height={totalHeight}
++          style={{ display: "block", transition: "height 280ms ease" }}
++        >
++          <defs>
++            <linearGradient id="bg-gradient" x1="0" y1="0" x2="1" y2="0">
++              <stop offset="0" stopColor="#F5EFE2" stopOpacity="0.4" />
++              <stop offset="1" stopColor="#FBF8F1" stopOpacity="0" />
++            </linearGradient>
++            {Object.entries(FAMILY_META).map(([key, meta]) => (
++              <linearGradient key={key} id={`grad-${key}`} x1="0" y1="0" x2="1" y2="0">
++                <stop offset="0" stopColor={meta.color} stopOpacity="0.5" />
++                <stop offset="1" stopColor={meta.color} stopOpacity="0.9" />
++              </linearGradient>
++            ))}
++          </defs>
++
++          {/* 时间事件竖线（贯穿整个 ribbon 区） */}
++          <g className="event-lines">
++            {EVENTS.map((e) => (
++              <line
++                key={e.year}
++                x1={xScale(e.year)}
++                x2={xScale(e.year)}
++                y1={0}
++                y2={totalHeight}
++                stroke="#C4A05A"
++                strokeWidth={0.5}
++                strokeDasharray="2 4"
++                opacity={0.35}
++              />
++            ))}
++          </g>
++
++          {/* 河流底色 */}
++          <rect
++            x={MARGIN.left}
++            y={0}
++            width={width - MARGIN.left - MARGIN.right}
++            height={totalHeight}
++            fill="url(#bg-gradient)"
++          />
++
++          {/* Ribbons */}
++          <g className="ribbons">
++            {ribbons.map((r) => {
++              const isFocus = !focusIds || focusIds.has(r.id);
++              const isReconstructed = r.status === "reconstructed";
++              const isExtinct = r.status === "extinct" || r.status === "historical";
++              return (
++                <path
++                  key={r.id}
++                  d={r.path}
++                  className={`river cursor-pointer ${isFocus ? "" : "river-dim"} ${
++                    hoveredId === r.id || selectedId === r.id ? "river-highlight" : ""
++                  }`}
++                  fill={`url(#grad-${r.family})`}
++                  opacity={isReconstructed ? 0.45 : isExtinct ? 0.72 : 0.92}
++                  stroke={familyColor(r.family)}
++                  strokeWidth={selectedId === r.id ? 1.6 : 0.4}
++                  strokeOpacity={0.5}
++                  strokeDasharray={isReconstructed ? "3 3" : undefined}
++                  onMouseEnter={() => setHoveredId(r.id)}
++                  onMouseLeave={() => setHoveredId(null)}
++                  onClick={() => setSelectedId(selectedId === r.id ? null : r.id)}
+                 >
+-                  {r.name.en}
+-                </text>
+-              )}
++                  <title>
++                    {r.name.zh} · {r.name.en}
++                  </title>
++                </path>
++              );
++            })}
++          </g>
++
++          {/* 借用虚线 */}
++          {showContacts && (
++            <g className="contacts">
++              {CONTACTS.map((c) => {
++                const src = ribbonsById.get(c.source);
++                const tgt = ribbonsById.get(c.target);
++                if (!src || !tgt) return null;
++                const x = xScale(c.year);
++                const y1 = src.yStart;
++                const y2 = tgt.yStart;
++                const cx = x + 32;
++                const isFocus = !focusIds || focusIds.has(c.source) || focusIds.has(c.target);
++                return (
++                  <path
++                    key={c.id}
++                    d={`M ${x},${y1} C ${cx},${y1} ${cx},${y2} ${x + 2},${y2}`}
++                    className="contact-loan"
++                    fill="none"
++                    stroke="#8A6A28"
++                    strokeWidth={c.strength === 2 ? 1.2 : 0.7}
++                    opacity={isFocus ? 0.5 : 0.08}
++                  />
++                );
++              })}
+             </g>
+-          );
+-        })}
+-      </g>
+-
+-      {/* 时间轴 */}
+-      <g className="time-axis">
+-        <line
+-          x1={MARGIN.left}
+-          x2={width - MARGIN.right}
+-          y1={svgHeight - MARGIN.bottom + 1}
+-          y2={svgHeight - MARGIN.bottom + 1}
+-          stroke="#5C5247"
+-          strokeWidth={0.6}
+-        />
+-        {X_TICKS.map((y) => (
+-          <g key={y}>
+-            <line
+-              x1={xScale(y)}
+-              x2={xScale(y)}
+-              y1={svgHeight - MARGIN.bottom + 1}
+-              y2={svgHeight - MARGIN.bottom + 6}
+-              stroke="#5C5247"
+-              strokeWidth={0.6}
+-            />
+-            <text
+-              x={xScale(y)}
+-              y={svgHeight - MARGIN.bottom + 22}
+-              textAnchor="middle"
+-              fontSize={11}
+-              fontFamily="'Cormorant Garamond', serif"
+-              fill="#3A332A"
+-            >
+-              {y < 0 ? `${Math.abs(y)} BCE` : y === 0 ? "0" : `${y} CE`}
+-            </text>
++          )}
++
++          {/* Collapse / Expand 三角图标 */}
++          <g className="collapsers">
++            {ribbons.map((r) => {
++              if (!r.collapsible) return null;
++              const cx = xScale(r.born) - 10;
++              const cy = r.yStart;
++              const collapsed = r.collapsed;
++              const isHover = hoveredId === r.id;
++              return (
++                <g
++                  key={`c-${r.id}`}
++                  transform={`translate(${cx}, ${cy})`}
++                  onClick={(e) => {
++                    e.stopPropagation();
++                    toggleCollapse(r.id);
++                  }}
++                  className="cursor-pointer"
++                  style={{ pointerEvents: "auto" }}
++                >
++                  <title>
++                    {collapsed ? "展开 / Expand" : "折叠 / Collapse"} — {r.descendantCount} descendants
++                  </title>
++                  <circle r={7.5} fill="#FBF8F1" stroke={familyColor(r.family)} strokeWidth={1.2} opacity={isHover ? 1 : 0.85} />
++                  {/* 三角：展开 ▼ 折叠 ▶ */}
++                  {collapsed ? (
++                    <path d="M -2.2 -3.4 L 3.2 0 L -2.2 3.4 Z" fill={familyColor(r.family)} />
++                  ) : (
++                    <path d="M -3.4 -2.2 L 0 3.2 L 3.4 -2.2 Z" fill={familyColor(r.family)} />
++                  )}
++                </g>
++              );
++            })}
++          </g>
++
++          {/* 语言标签 */}
++          <g className="labels">
++            {ribbons.map((r) => {
++              if (r.status === "reconstructed") {
++                return (
++                  <text
++                    key={r.id}
++                    x={xScale(r.born) + 6}
++                    y={r.yStart}
++                    fontSize={10}
++                    fontStyle="italic"
++                    fontFamily="'Cormorant Garamond', 'Noto Serif SC', serif"
++                    fill="#5C5247"
++                    opacity={focusIds && !focusIds.has(r.id) ? 0.18 : 0.85}
++                    dominantBaseline="middle"
++                    pointerEvents="none"
++                  >
++                    * {r.name.zh}
++                  </text>
++                );
++              }
++              if (r.died < 2020 && !r.collapsed) {
++                return (
++                  <text
++                    key={r.id}
++                    x={xScale(r.died) + 6}
++                    y={r.yStart}
++                    fontSize={11}
++                    fontFamily="'Noto Serif SC', 'Cormorant Garamond', serif"
++                    fontStyle="italic"
++                    fill="#5C5247"
++                    opacity={focusIds && !focusIds.has(r.id) ? 0.15 : 0.78}
++                    dominantBaseline="middle"
++                    pointerEvents="none"
++                  >
++                    † {r.name.zh}
++                  </text>
++                );
++              }
++              // living OR collapsed (treated as leaf — show on right)
++              const lines = isMobile ? splitLongName(r.name.zh, 6) : [r.name.zh];
++              const isHighlighted = hoveredId === r.id || selectedId === r.id;
++              return (
++                <g key={r.id}>
++                  {lines.map((line, i) => (
++                    <text
++                      key={i}
++                      x={width - MARGIN.right + 8}
++                      y={r.yStart + (i - (lines.length - 1) / 2) * 13}
++                      fontSize={isHighlighted ? 14 : 12}
++                      fontFamily="'Noto Serif SC', 'Cormorant Garamond', serif"
++                      fill={isHighlighted ? familyColor(r.family) : "#3A332A"}
++                      fontWeight={isHighlighted ? 600 : 400}
++                      opacity={focusIds && !focusIds.has(r.id) ? 0.18 : 0.95}
++                      dominantBaseline="middle"
++                      pointerEvents="none"
++                    >
++                      {line}
++                      {r.collapsed && <tspan fill="#A8853C" fontSize={9} dx={4}>+{r.descendantCount}</tspan>}
++                    </text>
++                  ))}
++                  {isHighlighted && (
++                    <text
++                      x={width - MARGIN.right + 8}
++                      y={r.yStart + (lines.length / 2) * 13 + 4}
++                      fontSize={10}
++                      fontStyle="italic"
++                      fontFamily="'Cormorant Garamond', serif"
++                      fill={familyColor(r.family)}
++                      opacity={0.75}
++                      dominantBaseline="middle"
++                      pointerEvents="none"
++                    >
++                      {r.name.en}
++                    </text>
++                  )}
++                </g>
++              );
++            })}
+           </g>
+-        ))}
+-      </g>
+ 
+-      {/* 左侧语系标 — v3: 字号增大 + 宽空间 */}
+-      <g className="family-labels">
+-        {(Object.entries(FAMILY_META) as [FamilyId, typeof FAMILY_META[FamilyId]][]).map(([key, meta]) => {
+-          if (!enabledFamilies.has(key)) return null;
+-          const ys = ribbons.filter((r) => r.family === key).map((r) => r.yStart);
+-          if (ys.length === 0) return null;
+-          const minY = Math.min(...ys), maxY = Math.max(...ys);
+-          const midY = (minY + maxY) / 2;
+-          return (
+-            <g key={key}>
++          {/* 左侧语系标 */}
++          <g className="family-labels">
++            {(Object.entries(FAMILY_META) as [FamilyId, typeof FAMILY_META[FamilyId]][]).map(([key, meta]) => {
++              if (!enabledFamilies.has(key)) return null;
++              const ys = ribbons.filter((r) => r.family === key).map((r) => r.yStart);
++              if (ys.length === 0) return null;
++              const minY = Math.min(...ys), maxY = Math.max(...ys);
++              const midY = (minY + maxY) / 2;
++              return (
++                <g key={key}>
++                  <line
++                    x1={MARGIN.left - 20}
++                    x2={MARGIN.left - 20}
++                    y1={minY - 6}
++                    y2={maxY + 6}
++                    stroke={meta.color}
++                    strokeWidth={2.6}
++                    opacity={0.75}
++                    strokeLinecap="round"
++                  />
++                  <text
++                    x={MARGIN.left - 30}
++                    y={midY - 8}
++                    textAnchor="end"
++                    fontSize={isMobile ? 13 : 16}
++                    fontFamily="'Noto Serif SC', serif"
++                    fill={meta.color}
++                    fontWeight={600}
++                    dominantBaseline="middle"
++                  >
++                    {meta.zh}
++                  </text>
++                  <text
++                    x={MARGIN.left - 30}
++                    y={midY + 10}
++                    textAnchor="end"
++                    fontSize={isMobile ? 9.5 : 11}
++                    fontStyle="italic"
++                    fontFamily="'Cormorant Garamond', serif"
++                    fill={meta.color}
++                    opacity={0.75}
++                    dominantBaseline="middle"
++                  >
++                    {meta.en}
++                  </text>
++                </g>
++              );
++            })}
++          </g>
++        </svg>
++      </div>
++
++      {/* ============ STICKY BOTTOM: Time axis ============ */}
++      <div
++        className="shrink-0 bg-cream-50 border-t border-cream-200"
++        style={{ width, height: FOOTER_H, position: "sticky", bottom: 0, zIndex: 30 }}
++      >
++        <svg width={width} height={FOOTER_H}>
++          <line
++            x1={MARGIN.left}
++            x2={width - MARGIN.right}
++            y1={6}
++            y2={6}
++            stroke="#5C5247"
++            strokeWidth={0.6}
++          />
++          {X_TICKS.map((y) => (
++            <g key={y}>
+               <line
+-                x1={MARGIN.left - 20}
+-                x2={MARGIN.left - 20}
+-                y1={minY - 6}
+-                y2={maxY + 6}
+-                stroke={meta.color}
+-                strokeWidth={2.6}
+-                opacity={0.75}
+-                strokeLinecap="round"
++                x1={xScale(y)}
++                x2={xScale(y)}
++                y1={6}
++                y2={11}
++                stroke="#5C5247"
++                strokeWidth={0.6}
+               />
+               <text
+-                x={MARGIN.left - 30}
+-                y={midY - 8}
+-                textAnchor="end"
+-                fontSize={isMobile ? 13 : 16}   /* v3: 13→16 desktop */
+-                fontFamily="'Noto Serif SC', serif"
+-                fill={meta.color}
+-                fontWeight={600}
+-                dominantBaseline="middle"
+-              >
+-                {meta.zh}
+-              </text>
+-              <text
+-                x={MARGIN.left - 30}
+-                y={midY + 10}
+-                textAnchor="end"
+-                fontSize={isMobile ? 9.5 : 11}   /* v3: 9.5→11 desktop */
+-                fontStyle="italic"
++                x={xScale(y)}
++                y={26}
++                textAnchor="middle"
++                fontSize={11}
+                 fontFamily="'Cormorant Garamond', serif"
+-                fill={meta.color}
+-                opacity={0.75}
+-                dominantBaseline="middle"
++                fill="#3A332A"
+               >
+-                {meta.en}
++                {y < 0 ? `${Math.abs(y)} BCE` : y === 0 ? "0" : `${y} CE`}
+               </text>
+             </g>
+-          );
+-        })}
+-      </g>
+-
+-      {/* 标题 */}
+-      <text
+-        x={MARGIN.left}
+-        y={24}
+-        fontSize={14}
+-        fontFamily="'Cormorant Garamond', serif"
+-        fontStyle="italic"
+-        fill="#82282C"
+-      >
+-        从原始印欧语到现代世界 · From Proto-Languages to Today
+-      </text>
+-    </svg>
++          ))}
++          {/* 提示：可滚动 + 折叠提示 */}
++          <text
++            x={width / 2}
++            y={FOOTER_H - 4}
++            textAnchor="middle"
++            fontSize={9}
++            fontStyle="italic"
++            fill="#A8853C"
++            opacity={0.7}
++          >
++            点击语支左端 ▼ 折叠后代 · Click ▼ at branch start to collapse · 滚动查看完整族谱
++          </text>
++        </svg>
++      </div>
++    </div>
+   );
+ }
+--- a/app/components/App.tsx
++++ b/app/components/App.tsx
+@@ -1,14 +1,16 @@
+ "use client";
+-import { useEffect, useRef, useState } from "react";
++import { useCallback, useEffect, useRef, useState } from "react";
+ import RiverChart from "./RiverChart";
+ import ScriptTree from "./ScriptTree";
+ import DetailPanel from "./DetailPanel";
+ import Controls from "./Controls";
+ import { FAMILY_META, type FamilyId } from "@/lib/types";
+ 
++const TOOLBAR_H = 60;
++
+ export default function App() {
+   const containerRef = useRef<HTMLDivElement>(null);
+-  const [size, setSize] = useState({ width: 1200, minHeight: 700 });
++  const [size, setSize] = useState({ width: 1200, containerHeight: 700 });
+   const [hoveredId, setHoveredId] = useState<string | null>(null);
+   const [selectedId, setSelectedId] = useState<string | null>(null);
+   const [mode, setMode] = useState<"language" | "script">("language");
+@@ -16,6 +18,7 @@
+   const [enabledFamilies, setEnabledFamilies] = useState<Set<FamilyId>>(
+     new Set(Object.keys(FAMILY_META) as FamilyId[])
+   );
++  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
+   const [isMobile, setIsMobile] = useState(false);
+ 
+   useEffect(() => {
+@@ -26,7 +29,7 @@
+       const detailW = w >= 1024 ? 340 : 0;
+       setSize({
+         width: Math.max(720, w - detailW - 2),
+-        minHeight: Math.max(500, h - 60 - 2),
++        containerHeight: Math.max(420, h - TOOLBAR_H - 2),
+       });
+     }
+     onResize();
+@@ -42,11 +45,21 @@
+     });
+   }
+ 
++  const toggleCollapse = useCallback((id: string) => {
++    setCollapsedIds((prev) => {
++      const next = new Set(prev);
++      if (next.has(id)) next.delete(id); else next.add(id);
++      return next;
++    });
++  }, []);
++
++  const resetCollapsed = useCallback(() => setCollapsedIds(new Set()), []);
++
+   const focusId = hoveredId ?? selectedId;
+ 
+-  // Mobile: 总宽度更宽（横向滚动），最小高度由 layout 算法决定
++  // Mobile: chart 更宽（横向滚动），桌面用 viewport 宽
+   const chartWidth = isMobile ? 1700 : size.width;
+-  const chartMinHeight = isMobile ? 1200 : size.minHeight;
++  const chartContainerHeight = size.containerHeight;
+ 
+   return (
+     <div ref={containerRef} className="h-screen w-screen overflow-hidden flex flex-col bg-cream-50">
+@@ -57,18 +70,17 @@
+         setShowContacts={setShowContacts}
+         enabledFamilies={enabledFamilies}
+         toggleFamily={toggleFamily}
++        collapsedCount={collapsedIds.size}
++        resetCollapsed={resetCollapsed}
+       />
+ 
+       <div className="flex-1 flex min-h-0 overflow-hidden">
+-        {/* 主图区：双向滚动（X 时间 + Y 语系堆叠） — overflow-auto 关键 */}
+-        <div
+-          className="flex-1 overflow-auto min-h-0"
+-          style={{ maxHeight: "calc(100vh - 60px)" }}
+-        >
++        {/* 主图区 — 横向滚动外层（mobile 用），垂直滚动在 RiverChart 内部 */}
++        <div className="flex-1 overflow-x-auto overflow-y-hidden min-w-0">
+           {mode === "language" ? (
+             <RiverChart
+               width={chartWidth}
+-              minHeight={chartMinHeight}
++              containerHeight={chartContainerHeight}
+               isMobile={isMobile}
+               hoveredId={hoveredId}
+               selectedId={selectedId}
+@@ -76,16 +88,19 @@
+               setSelectedId={setSelectedId}
+               showContacts={showContacts}
+               enabledFamilies={enabledFamilies}
++              collapsedIds={collapsedIds}
++              toggleCollapse={toggleCollapse}
+             />
+           ) : (
+-            <ScriptTree
+-              width={chartWidth}
+-              height={isMobile ? 1400 : size.minHeight}
+-            />
++            <div className="overflow-auto" style={{ maxHeight: chartContainerHeight }}>
++              <ScriptTree
++                width={chartWidth}
++                height={isMobile ? 1400 : chartContainerHeight}
++              />
++            </div>
+           )}
+         </div>
+ 
+-        {/* Desktop 右侧详情 */}
+         {!isMobile && (
+           <aside className="hidden lg:block w-[340px] border-l border-cream-200 bg-cream-50 overflow-hidden shrink-0">
+             <DetailPanel id={focusId} />
+@@ -93,10 +108,7 @@
+         )}
+       </div>
+ 
+-      {/* Mobile 底部 sheet */}
+-      {isMobile && (
+-        <MobileSheet focusId={focusId} />
+-      )}
++      {isMobile && <MobileSheet focusId={focusId} />}
+     </div>
+   );
+ }
+--- a/app/components/Controls.tsx
++++ b/app/components/Controls.tsx
+@@ -8,6 +8,8 @@
+   setShowContacts: (b: boolean) => void;
+   enabledFamilies: Set<FamilyId>;
+   toggleFamily: (f: FamilyId) => void;
++  collapsedCount?: number;
++  resetCollapsed?: () => void;
+ }
+ 
+ export default function Controls({
+@@ -17,6 +19,8 @@
+   setShowContacts,
+   enabledFamilies,
+   toggleFamily,
++  collapsedCount = 0,
++  resetCollapsed,
+ }: Props) {
+   return (
+     <div className="flex items-center gap-4 px-5 py-3 border-b border-cream-200 bg-cream-50/80 backdrop-blur-sm">
+@@ -75,6 +79,17 @@
+             })}
+           </div>
+ 
++          {/* 折叠状态指示 + reset */}
++          {collapsedCount > 0 && resetCollapsed && (
++            <button
++              onClick={resetCollapsed}
++              className="text-[10px] px-2 py-0.5 rounded-full border border-carmine-500 text-carmine-500 hover:bg-carmine-500 hover:text-cream-50 transition-colors"
++              title="展开所有折叠的分支 / Expand all collapsed branches"
++            >
++              展开全部 ({collapsedCount})
++            </button>
++          )}
++
+           <label className="flex items-center gap-1.5 text-xs text-ink-500 ml-auto cursor-pointer">
+             <input
+               type="checkbox"
