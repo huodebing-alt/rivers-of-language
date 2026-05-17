@@ -1,0 +1,44 @@
+[
+  { "id": "c_mc_japan", "source": "middle_chinese", "target": "old_japanese", "year": 600, "kind": "loan", "strength": 2, "example": { "zh": "音读「kan-on / go-on」全部来自中古汉语", "en": "All 'on-yomi' readings of kanji are from Middle Chinese" }, "notes": { "zh": "日语「漢字音読」系统化借入，6–9 世纪", "en": "Sino-Japanese vocabulary systematically borrowed 6–9c" } },
+  { "id": "c_mc_korea", "source": "middle_chinese", "target": "old_korean", "year": 600, "kind": "loan", "strength": 2, "example": { "zh": "60-70% 韩语词汇是汉源词", "en": "60-70% of Korean vocabulary is Sino-Korean" } },
+  { "id": "c_mc_vietnam", "source": "middle_chinese", "target": "old_vietnamese", "year": 600, "kind": "loan", "strength": 2, "example": { "zh": "60%+ 越南语词汇是汉源词", "en": "60%+ of Vietnamese vocabulary is Sino-Vietnamese" } },
+  { "id": "c_mc_japan_modern", "source": "middle_chinese", "target": "japanese", "year": 1200, "kind": "loan", "strength": 1, "example": { "zh": "进一步借入「唐音」", "en": "Tang-on readings borrowed in Kamakura era" } },
+
+  { "id": "c_sumerian_akkadian", "source": "akkadian", "target": "akkadian", "year": -2500, "kind": "substrate", "strength": 2, "example": { "zh": "苏美尔语（孤立语）→ 阿卡德语大量借词；楔形文字也借入", "en": "Sumerian (isolate) loaned heavily into Akkadian + cuneiform script" } },
+
+  { "id": "c_arabic_persian", "source": "classical_arabic", "target": "persian", "year": 700, "kind": "loan", "strength": 2, "example": { "zh": "波斯语 ~40% 词汇是阿拉伯语借词（伊斯兰化后）", "en": "~40% of Persian vocabulary is Arabic loans post-Islamization" } },
+  { "id": "c_arabic_turkish", "source": "classical_arabic", "target": "ottoman", "year": 1300, "kind": "loan", "strength": 2, "example": { "zh": "奥斯曼土耳其语 30%+ 阿语+波斯语借词，1928 改革后减少", "en": "Ottoman 30%+ Arabic/Persian; reduced after 1928 reform" } },
+  { "id": "c_arabic_swahili", "source": "classical_arabic", "target": "swahili", "year": 900, "kind": "loan", "strength": 2, "example": { "zh": "斯瓦希里语 30% 阿语借词", "en": "Swahili ~30% Arabic loans" } },
+  { "id": "c_arabic_urdu", "source": "classical_arabic", "target": "urdu", "year": 1300, "kind": "loan", "strength": 2 },
+  { "id": "c_persian_urdu", "source": "persian", "target": "urdu", "year": 1300, "kind": "loan", "strength": 2 },
+  { "id": "c_persian_ottoman", "source": "persian", "target": "ottoman", "year": 1300, "kind": "loan", "strength": 2 },
+
+  { "id": "c_norman_english", "source": "old_french", "target": "middle_english", "year": 1100, "kind": "loan", "strength": 2, "example": { "zh": "诺曼征服后 ~10000 法语借词进入英语", "en": "~10,000 French loans into English after Norman Conquest (1066)" } },
+  { "id": "c_latin_english", "source": "latin", "target": "english", "year": 1500, "kind": "loan", "strength": 2, "example": { "zh": "文艺复兴拉丁词大量借入（science, education, etc.）", "en": "Renaissance-era Latin loans (science, education, etc.)" } },
+  { "id": "c_latin_german", "source": "latin", "target": "old_high_german", "year": 800, "kind": "loan", "strength": 1 },
+
+  { "id": "c_old_norse_english", "source": "old_norse", "target": "old_english", "year": 900, "kind": "loan", "strength": 2, "example": { "zh": "维京人统治下大量北欧词进入英语：sky, egg, they, are", "en": "Viking-era Norse loans: sky, egg, they, are, take" } },
+
+  { "id": "c_greek_latin", "source": "ancient_greek", "target": "latin", "year": -200, "kind": "loan", "strength": 2 },
+  { "id": "c_greek_english", "source": "ancient_greek", "target": "english", "year": 1600, "kind": "loan", "strength": 2, "example": { "zh": "近代科技学术词汇大量希腊词根", "en": "Greek roots throughout modern scientific vocabulary" } },
+
+  { "id": "c_aramaic_hebrew", "source": "old_aramaic", "target": "biblical_hebrew", "year": -500, "kind": "loan", "strength": 2 },
+  { "id": "c_aramaic_arabic", "source": "old_aramaic", "target": "classical_arabic", "year": 100, "kind": "substrate", "strength": 1 },
+
+  { "id": "c_skt_indo_aryan", "source": "sanskrit", "target": "hindi", "year": 1200, "kind": "loan", "strength": 2, "example": { "zh": "「梵化」(tatsama) — 现代印地语高雅词汇借自梵语", "en": "Tatsama — Sanskrit loans into Hindi for high register" } },
+  { "id": "c_skt_indonesian", "source": "sanskrit", "target": "malay", "year": 500, "kind": "loan", "strength": 1, "example": { "zh": "印度教文化通过马来 → 东南亚", "en": "Sanskrit via Hindu-Buddhist trade into SE Asia" } },
+  { "id": "c_skt_tibetan", "source": "sanskrit", "target": "old_tibetan", "year": 700, "kind": "loan", "strength": 2, "example": { "zh": "佛教经典翻译", "en": "Buddhist canon translations" } },
+
+  { "id": "c_chinese_korean_modern", "source": "mandarin", "target": "korean", "year": 1900, "kind": "loan", "strength": 1 },
+
+  { "id": "c_english_modern_global", "source": "english", "target": "japanese", "year": 1950, "kind": "loan", "strength": 2, "example": { "zh": "「外来語」(gairaigo) — 战后大量英语借词", "en": "Gairaigo — post-WWII English loans" } },
+  { "id": "c_english_german", "source": "english", "target": "german", "year": 1990, "kind": "loan", "strength": 1, "example": { "zh": "「Denglisch」现象", "en": "Modern 'Denglisch' phenomenon" } },
+  { "id": "c_english_mandarin", "source": "english", "target": "mandarin", "year": 1980, "kind": "loan", "strength": 1 },
+
+  { "id": "c_phoenician_greek", "source": "phoenician", "target": "ancient_greek", "year": -800, "kind": "script", "strength": 2, "example": { "zh": "希腊字母直接借自腓尼基字母", "en": "Greek alphabet derived from Phoenician" } },
+  { "id": "c_greek_latin_script", "source": "ancient_greek", "target": "latin", "year": -700, "kind": "script", "strength": 2 },
+  { "id": "c_greek_cyrillic", "source": "byzantine_greek", "target": "ocs", "year": 860, "kind": "script", "strength": 2, "example": { "zh": "格拉哥里和西里尔字母由拜占庭传教士创制", "en": "Glagolitic/Cyrillic created by Byzantine missionaries" } },
+
+  { "id": "c_proto_substrate_english", "source": "old_french", "target": "english", "year": 1500, "kind": "loan", "strength": 2 },
+  { "id": "c_indic_persian_arabic", "source": "msa", "target": "persian", "year": 2000, "kind": "loan", "strength": 1 }
+]

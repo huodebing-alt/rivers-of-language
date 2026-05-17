@@ -1,0 +1,199 @@
+[
+  {
+    "id": "pie_father",
+    "gloss": { "zh": "父亲", "en": "father" },
+    "proto": { "lang": "pie", "form": "*ph₂tḗr" },
+    "chain": [
+      { "lang": "pie", "form": "*ph₂tḗr", "ipa": "/pəh₂.ˈteːr/", "year": -3500 },
+      { "lang": "sanskrit", "form": "pitṛ́", "ipa": "/pɪˈtr̩/", "year": -1000 },
+      { "lang": "ancient_greek", "form": "πατήρ", "ipa": "/paˈtɛːr/", "year": -500 },
+      { "lang": "latin", "form": "pater", "ipa": "/ˈpa.ter/", "year": 0 },
+      { "lang": "old_irish", "form": "athir", "ipa": "/ˈaθir/", "year": 700 },
+      { "lang": "gothic", "form": "fadar", "ipa": "/ˈɸa.dar/", "year": 400 },
+      { "lang": "old_english", "form": "fæder", "ipa": "/ˈfæ.der/", "year": 800 },
+      { "lang": "middle_english", "form": "fader", "ipa": "/ˈfaː.dər/", "year": 1300 },
+      { "lang": "english", "form": "father", "ipa": "/ˈfɑː.ðər/", "year": 2000 },
+      { "lang": "old_high_german", "form": "fater", "ipa": "/ˈfa.ter/", "year": 900 },
+      { "lang": "german", "form": "Vater", "ipa": "/ˈfaː.tɐ/", "year": 2000 },
+      { "lang": "old_french", "form": "pedre", "ipa": "/ˈpe.drə/", "year": 1100 },
+      { "lang": "french", "form": "père", "ipa": "/pɛʁ/", "year": 2000 },
+      { "lang": "spanish", "form": "padre", "ipa": "/ˈpaðɾe/", "year": 2000 },
+      { "lang": "italian", "form": "padre", "ipa": "/ˈpaː.dre/", "year": 2000 },
+      { "lang": "persian", "form": "پدر pedar", "ipa": "/peˈdaɾ/", "year": 2000 },
+      { "lang": "russian", "form": "(no direct) ", "note": { "zh": "俄语未保留此根，改用 отец otets", "en": "Replaced in Slavic by *otьcь" } }
+    ]
+  },
+
+  {
+    "id": "pie_mother",
+    "gloss": { "zh": "母亲", "en": "mother" },
+    "proto": { "lang": "pie", "form": "*méh₂tēr" },
+    "chain": [
+      { "lang": "pie", "form": "*méh₂tēr", "ipa": "/ˈmeh₂.teːr/", "year": -3500 },
+      { "lang": "sanskrit", "form": "mātṛ́", "ipa": "/maːˈtr̩/", "year": -1000 },
+      { "lang": "ancient_greek", "form": "μήτηρ", "ipa": "/ˈmɛː.tɛːr/", "year": -500 },
+      { "lang": "latin", "form": "māter", "ipa": "/ˈmaː.ter/", "year": 0 },
+      { "lang": "old_english", "form": "mōdor", "ipa": "/ˈmoː.dor/", "year": 800 },
+      { "lang": "english", "form": "mother", "ipa": "/ˈmʌ.ðər/", "year": 2000 },
+      { "lang": "german", "form": "Mutter", "ipa": "/ˈmʊ.tɐ/", "year": 2000 },
+      { "lang": "french", "form": "mère", "ipa": "/mɛʁ/", "year": 2000 },
+      { "lang": "spanish", "form": "madre", "ipa": "/ˈma.ðɾe/", "year": 2000 },
+      { "lang": "russian", "form": "мать (matʹ)", "ipa": "/matʲ/", "year": 2000 },
+      { "lang": "persian", "form": "مادر mādar", "ipa": "/mɒːˈdaɾ/", "year": 2000 }
+    ]
+  },
+
+  {
+    "id": "pie_seven",
+    "gloss": { "zh": "七", "en": "seven" },
+    "proto": { "lang": "pie", "form": "*septḿ̥" },
+    "chain": [
+      { "lang": "pie", "form": "*septḿ̥", "ipa": "/sepˈtm̩/", "year": -3500 },
+      { "lang": "sanskrit", "form": "sapta", "ipa": "/ˈsap.ta/", "year": -1000 },
+      { "lang": "ancient_greek", "form": "ἑπτά", "ipa": "/heˈpta/", "year": -500 },
+      { "lang": "latin", "form": "septem", "ipa": "/ˈsep.tem/", "year": 0 },
+      { "lang": "old_english", "form": "seofon", "ipa": "/ˈseo.von/", "year": 800 },
+      { "lang": "english", "form": "seven", "ipa": "/ˈsɛ.vən/", "year": 2000 },
+      { "lang": "german", "form": "sieben", "ipa": "/ˈziː.bən/", "year": 2000 },
+      { "lang": "french", "form": "sept", "ipa": "/sɛt/", "year": 2000 },
+      { "lang": "russian", "form": "семь semʹ", "ipa": "/sʲemʲ/", "year": 2000 },
+      { "lang": "persian", "form": "هفت haft", "ipa": "/hæft/", "year": 2000, "note": { "zh": "印伊语 s- → h-", "en": "Indo-Iranian s- → h- shift" } }
+    ]
+  },
+
+  {
+    "id": "pie_wheel",
+    "gloss": { "zh": "轮 / 转动", "en": "wheel / to turn" },
+    "proto": { "lang": "pie", "form": "*kʷékʷlos" },
+    "chain": [
+      { "lang": "pie", "form": "*kʷékʷlos", "ipa": "/ˈkʷek.ʷlos/", "year": -3500, "note": { "zh": "重叠词，由 *kʷel- 「转」重复构成", "en": "Reduplicated form of *kʷel- 'to turn'" } },
+      { "lang": "sanskrit", "form": "cakrá", "ipa": "/ˈtʃak.ra/", "year": -1000 },
+      { "lang": "ancient_greek", "form": "κύκλος kúklos", "ipa": "/ˈky.klos/", "year": -500 },
+      { "lang": "old_english", "form": "hwēol", "ipa": "/ˈʍeːol/", "year": 800 },
+      { "lang": "english", "form": "wheel", "ipa": "/wiːl/", "year": 2000 },
+      { "lang": "tocharian_a", "form": "kukäl", "ipa": "/ˈku.kæl/", "year": 500, "note": { "zh": "中亚保留双唇圆音", "en": "Central Asian retention of labio-velar" } }
+    ]
+  },
+
+  {
+    "id": "oc_father",
+    "gloss": { "zh": "父", "en": "father" },
+    "proto": { "lang": "p_sinitic", "form": "*paʔ" },
+    "chain": [
+      { "lang": "old_chinese", "form": "父 *paʔ", "ipa": "/paʔ/", "year": -1000 },
+      { "lang": "han_chinese", "form": "父 *bjuoʔ", "ipa": "/bjuoʔ/", "year": 0 },
+      { "lang": "middle_chinese", "form": "父 bjuX", "ipa": "/bɨoX/", "year": 700, "note": { "zh": "全浊声母 b-", "en": "Middle Chinese voiced initial b-" } },
+      { "lang": "mandarin", "form": "父 fù", "ipa": "/fu⁵¹/", "year": 2000, "note": { "zh": "全浊声母 → 清擦音 f-（唇音轻化）", "en": "Voiced b- → voiceless fricative f- (labial lenition)" } },
+      { "lang": "cantonese", "form": "父 fu6", "ipa": "/fuː²²/", "year": 2000 },
+      { "lang": "min_nan", "form": "父 hū / pē", "ipa": "/hu³³/  /pe³³/", "year": 2000, "note": { "zh": "文读 hū / 白读 pē — 保留古汉语 p- 声母", "en": "Literary hū / colloquial pē — preserves OC *p-" } },
+      { "lang": "japanese", "form": "父 chichi / fu", "ipa": "/tɕitɕi/", "year": 2000, "note": { "zh": "音读 fu 来自中古汉语 bjuX", "en": "On-yomi fu < Middle Chinese bjuX (borrowed)" } },
+      { "lang": "korean", "form": "부 (父) bu", "ipa": "/pu/", "year": 2000, "note": { "zh": "汉源词", "en": "Sino-Korean reading" } },
+      { "lang": "vietnamese", "form": "phụ (父)", "ipa": "/fuʔ/", "year": 2000, "note": { "zh": "汉源词", "en": "Sino-Vietnamese reading" } }
+    ]
+  },
+
+  {
+    "id": "oc_horse",
+    "gloss": { "zh": "马", "en": "horse" },
+    "proto": { "lang": "p_sinitic", "form": "*mraːʔ" },
+    "chain": [
+      { "lang": "old_chinese", "form": "馬 *mraːʔ", "ipa": "/mraːʔ/", "year": -1000, "note": { "zh": "复辅音 mr-", "en": "Consonant cluster mr-" } },
+      { "lang": "middle_chinese", "form": "馬 maeX", "ipa": "/mæX/", "year": 700 },
+      { "lang": "mandarin", "form": "马 mǎ", "ipa": "/ma²¹⁴/", "year": 2000 },
+      { "lang": "cantonese", "form": "馬 maa5", "ipa": "/maː¹³/", "year": 2000 },
+      { "lang": "japanese", "form": "馬 uma / ba", "ipa": "/uma/", "year": 2000, "note": { "zh": "训读 uma 可能就是上古汉语借词", "en": "Native kun-reading uma may be very early OC loan" } }
+    ]
+  },
+
+  {
+    "id": "oc_one",
+    "gloss": { "zh": "一", "en": "one" },
+    "proto": { "lang": "p_sinitic", "form": "*ʔit" },
+    "chain": [
+      { "lang": "old_chinese", "form": "一 *ʔit", "ipa": "/ʔit/", "year": -1000 },
+      { "lang": "middle_chinese", "form": "一 ʔjit", "ipa": "/ʔɨt/", "year": 700, "note": { "zh": "入声 -t 韵尾", "en": "Entering tone, -t coda" } },
+      { "lang": "mandarin", "form": "一 yī", "ipa": "/i⁵⁵/", "year": 2000, "note": { "zh": "入声消失，-t 脱落", "en": "Entering tone lost, -t coda dropped" } },
+      { "lang": "cantonese", "form": "一 jat1", "ipa": "/jɐt̚⁵/", "year": 2000, "note": { "zh": "保留 -t 韵尾", "en": "Preserves -t coda" } },
+      { "lang": "min_nan", "form": "一 it / chi̍t", "ipa": "/it̚/", "year": 2000 },
+      { "lang": "japanese", "form": "一 ichi / itsu", "ipa": "/itɕi/", "year": 2000, "note": { "zh": "音读 ichi 来自中古汉语 ʔjit", "en": "On-yomi ichi < MC ʔjit" } },
+      { "lang": "korean", "form": "일 (一) il", "ipa": "/il/", "year": 2000, "note": { "zh": "汉源词，-t → -l", "en": "Sino-Korean, MC -t → Korean -l" } },
+      { "lang": "vietnamese", "form": "nhất (一)", "ipa": "/ɲət̚/", "year": 2000 }
+    ]
+  },
+
+  {
+    "id": "psem_father",
+    "gloss": { "zh": "父亲", "en": "father" },
+    "proto": { "lang": "p_semitic", "form": "*ʔab-" },
+    "chain": [
+      { "lang": "p_semitic", "form": "*ʔab-", "ipa": "/ʔab/", "year": -3000 },
+      { "lang": "akkadian", "form": "abu", "ipa": "/ˈa.bu/", "year": -1500 },
+      { "lang": "biblical_hebrew", "form": "אָב āv", "ipa": "/ʔɔv/", "year": -800 },
+      { "lang": "modern_hebrew", "form": "אַבָּא abba", "ipa": "/ˈʔaba/", "year": 2000 },
+      { "lang": "classical_arabic", "form": "أَب ʾab", "ipa": "/ʔab/", "year": 600 },
+      { "lang": "msa", "form": "أَب ab", "ipa": "/ab/", "year": 2000 },
+      { "lang": "amharic", "form": "አባት abat", "ipa": "/aˈbat/", "year": 2000 }
+    ]
+  },
+
+  {
+    "id": "pan_eye",
+    "gloss": { "zh": "眼睛", "en": "eye" },
+    "proto": { "lang": "p_austronesian", "form": "*maCa" },
+    "chain": [
+      { "lang": "p_austronesian", "form": "*maCa", "ipa": "/maˈt͡sa/", "year": -3000 },
+      { "lang": "p_malayo_polynesian", "form": "*mata", "ipa": "/ˈmata/", "year": -1500 },
+      { "lang": "malay", "form": "mata", "ipa": "/ˈmata/", "year": 2000 },
+      { "lang": "tagalog", "form": "mata", "ipa": "/ˈmata/", "year": 2000 },
+      { "lang": "javanese", "form": "mata / mripat", "ipa": "/ˈmata/", "year": 2000 },
+      { "lang": "malagasy", "form": "maso", "ipa": "/ˈmasu/", "year": 2000, "note": { "zh": "*t → s 变化", "en": "*t → s lenition" } },
+      { "lang": "hawaiian", "form": "maka", "ipa": "/ˈmaka/", "year": 2000, "note": { "zh": "*t → k (波利尼西亚特征)", "en": "*t → k (Polynesian sound shift)" } },
+      { "lang": "maori", "form": "mata", "ipa": "/ˈmata/", "year": 2000 },
+      { "lang": "fijian", "form": "mata", "ipa": "/ˈmata/", "year": 2000 },
+      { "lang": "samoan", "form": "mata", "ipa": "/ˈmata/", "year": 2000 },
+      { "lang": "amis", "form": "mata", "ipa": "/ˈmata/", "year": 2000 }
+    ]
+  },
+
+  {
+    "id": "pbantu_person",
+    "gloss": { "zh": "人", "en": "person" },
+    "proto": { "lang": "p_bantu", "form": "*-ntʊ" },
+    "chain": [
+      { "lang": "p_bantu", "form": "*mò-ntʊ̀", "ipa": "/mòntʊ̀/", "year": -1500 },
+      { "lang": "swahili", "form": "mtu (pl. watu)", "ipa": "/ˈmtu/", "year": 2000 },
+      { "lang": "zulu", "form": "umuntu (pl. abantu)", "ipa": "/uˈmuntu/", "year": 2000, "note": { "zh": "→ Bantu「班图」一词的来源", "en": "Source of the word 'Bantu' (= 'people')" } },
+      { "lang": "shona", "form": "munhu (pl. vanhu)", "ipa": "/muˈɲu/", "year": 2000 },
+      { "lang": "kongo", "form": "muntu (pl. bantu)", "ipa": "/ˈmuntu/", "year": 2000 },
+      { "lang": "lingala", "form": "moto (pl. bato)", "ipa": "/ˈmoto/", "year": 2000 }
+    ]
+  },
+
+  {
+    "id": "pdr_self",
+    "gloss": { "zh": "自己", "en": "self / I" },
+    "proto": { "lang": "p_dravidian", "form": "*yān" },
+    "chain": [
+      { "lang": "p_dravidian", "form": "*yān / *nān", "ipa": "/jaːn/", "year": -2000 },
+      { "lang": "old_tamil", "form": "yāṉ", "ipa": "/jaːn/", "year": 0 },
+      { "lang": "tamil", "form": "நான் nāṉ", "ipa": "/naːn/", "year": 2000 },
+      { "lang": "malayalam", "form": "ഞാൻ ñāṉ", "ipa": "/ɲaːn/", "year": 2000 },
+      { "lang": "kannada", "form": "ನಾನು nānu", "ipa": "/naːnu/", "year": 2000 },
+      { "lang": "telugu", "form": "నేను nēnu", "ipa": "/neːnu/", "year": 2000 }
+    ]
+  },
+
+  {
+    "id": "pturk_honey",
+    "gloss": { "zh": "蜂蜜 / 头颅 (双义历史)", "en": "honey / head" },
+    "proto": { "lang": "p_turkic", "form": "*bāl" },
+    "chain": [
+      { "lang": "p_turkic", "form": "*bāl", "ipa": "/baːl/", "year": 0 },
+      { "lang": "old_turkic", "form": "bal", "ipa": "/bal/", "year": 700 },
+      { "lang": "turkish", "form": "bal", "ipa": "/bal/", "year": 2000 },
+      { "lang": "azerbaijani", "form": "bal", "ipa": "/bal/", "year": 2000 },
+      { "lang": "kazakh", "form": "бал bal", "ipa": "/bal/", "year": 2000 },
+      { "lang": "uyghur", "form": "ھەسەل ھەسەl", "ipa": "/hæsæl/", "year": 2000, "note": { "zh": "维语用阿拉伯借词 hasal 替代了 bal", "en": "Uyghur replaced bal with Arabic loan hasal" } }
+    ]
+  }
+]

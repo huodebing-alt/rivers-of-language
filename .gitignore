@@ -1,0 +1,11 @@
+node_modules/
+.next/
+out/
+.DS_Store
+*.log
+.env.local
+.env*.local
+data/glottolog.json
+data/wikidata-langs.json
+data/wiktionary-etym.json
+data/languages.merged.json

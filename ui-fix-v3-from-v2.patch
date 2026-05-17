@@ -1,0 +1,925 @@
+--- a/lib/layout.ts
++++ b/lib/layout.ts
+@@ -1,20 +1,16 @@
+ /**
+- * 河流布局算法
++ * 河流布局算法 v2 — 修复下游 overlap + 长标签
+  *
+- * 输入：所有 LanguageNode + parent 关系
+- * 输出：每个节点的 ribbon path（一段 SVG path 字符串）
++ * 关键改动 vs v1：
++ *  - 每个 leaf 按 **峰值厚度** 预留垂直「车道」（min 7px / living, 5px / historical, + gap）
++ *  - SVG **总高度动态计算** — 不再固定容器高度，让所有 ribbon 都有空间，容器 overflow-y scroll
++ *  - ribbon 厚度有下限（living = 4px, historical = 2px），保证 hover 可点
++ *  - 后期 collision 检测：扫一遍所有 ribbon，发现 yStart 间距 < laneHeight 的对手就下推
+  *
+- * 算法：
+- * 1. 构建森林（每个语系一棵树）
+- * 2. 后序遍历，给每个 leaf 分配 Y position（按语系 + 分支 + 经度排序）
+- * 3. 给每个 internal node 计算 Y position（= 其子节点 Y 的加权平均，权重 = 子节点末期 speakers）
+- * 4. 每个节点每个 sample point: center_y = parent_center 在 born → 自己 center 在 (born + Δ)，
+- *    然后保持自己 center 到 died（或现在）
+- * 5. 半宽 = scale(log(speakers))
+- * 6. 生成 path：上边沿正向 + 下边沿反向 + Z
++ * 调用方拿到 `{ ribbons, totalHeight }`，把 totalHeight 设给 SVG 的 height 属性。
+  */
+ 
+-import { LANGUAGES, LANGUAGE_BY_ID, speakerAt, TIME_MIN, TIME_MAX } from "./data";
++import { LANGUAGES, LANGUAGE_BY_ID, speakerAt } from "./data";
+ import type { FamilyId, LanguageNode } from "./types";
+ 
+ export interface LaneRibbon {
+@@ -30,30 +26,39 @@
+   yStart: number;        // 出生 y
+   yEnd: number;          // 死亡 / 现在 y
+   parent?: string;
++  /** 当前在 modern 的厚度（用于 hit 区域判断） */
++  modernThickness: number;
++}
++
++export interface LayoutResult {
++  ribbons: LaneRibbon[];
++  totalHeight: number;
+ }
+ 
+ export interface LayoutOptions {
+-  width: number;         // 整图宽（px）
+-  height: number;        // 整图高（px）
++  width: number;
+   marginLeft: number;
+   marginRight: number;
+   marginTop: number;
+   marginBottom: number;
+-  /** 时间轴非线性 — 把古代拉宽、近代压缩，靠它在 -6500..2026 间分段 */
+   xScale: (year: number) => number;
+-  /** 估算流的厚度（输入 speakers 数） */
+   thickness: (speakers: number) => number;
++  /** 最小厚度（living），默认 7 */
++  minThickLiving?: number;
++  /** 最小厚度（historical / extinct），默认 5 */
++  minThickHistorical?: number;
++  /** Lane 间隔 gap，默认 3 */
++  laneGap?: number;
+ }
+ 
+-// X 轴：分段线性，让史前/上古/古典/中古/近代/现代区间宽度差不多
++// X 轴：分段线性
+ const SEGMENTS: [number, number, number][] = [
+-  // [yearStart, yearEnd, screenFraction]
+-  [-6500, -2500, 0.18],   // 史前 (4000 年 → 18%)
+-  [-2500, -200,  0.22],   // 上古 (2300 年 → 22%)
+-  [-200,   600,  0.16],   // 古典 (800 年 → 16%)
+-  [600,    1400, 0.18],   // 中古 (800 年 → 18%)
+-  [1400,   1800, 0.12],   // 近代 (400 年 → 12%)
+-  [1800,   2026, 0.14],   // 现代 (226 年 → 14%)
++  [-6500, -2500, 0.18],
++  [-2500, -200,  0.22],
++  [-200,   600,  0.16],
++  [600,    1400, 0.18],
++  [1400,   1800, 0.12],
++  [1800,   2026, 0.14],
+ ];
+ 
+ export function makeXScale(width: number, marginLeft: number, marginRight: number) {
+@@ -80,34 +85,34 @@
+ 
+ export const X_TICKS: number[] = [-6000, -4000, -3000, -2000, -1000, -500, 0, 500, 1000, 1500, 1800, 2000];
+ 
+-// 语系顺序（从上到下）：欧 → 中东 → 印 → 中亚 → 中 → 东南亚 → 非
+ const FAMILY_ORDER: FamilyId[] = ["ie", "afro", "dr", "turk", "st", "isolate", "an", "ng"];
+-
+-// 分支内部排序（地理）
+ const BRANCH_ORDER: Record<string, number> = {
+-  // IE: west to east
+   "celtic": 1, "germanic": 2, "north-germanic": 2.1, "west-germanic": 2.2, "east-germanic": 2.3,
+   "romance": 3, "italic": 3.5, "albanian": 4, "greek": 4.5, "slavic": 5, "balto-slavic": 5,
+   "baltic": 5.1, "armenian": 5.5, "anatolian": 6, "indo-iranian": 7, "iranian": 7.5,
+   "indo-aryan": 8, "tocharian": 9,
+-  // ST: Chinese first then Tibeto-Burman
+   "sinitic": 1, "tibetic": 2, "burmic": 3, "qiangic": 4, "karenic": 5, "sal": 6, "bai": 7,
+-  // Afro
++  "newaric": 8,
+   "semitic": 1, "east-semitic": 1.1, "nw-semitic": 1.2, "central-semitic": 1.3, "south-semitic": 1.4,
+   "egyptian": 2, "berber": 3, "cushitic": 4, "chadic": 5,
+-  // AN
+   "formosan": 0, "wmp": 1, "mp": 1.5, "oceanic": 2,
+-  // NG
+   "bantu": 1, "volta-niger": 2, "atlantic": 3, "kwa": 4,
+-  // isolate
+   "japonic": 1, "koreanic": 2, "vietic": 3,
+ };
+ 
+-export function computeLayout(opts: LayoutOptions): LaneRibbon[] {
+-  const { width, height, marginTop, marginBottom, xScale, thickness } = opts;
+-  const usableHeight = height - marginTop - marginBottom;
++export function computeLayout(opts: LayoutOptions): LayoutResult {
++  const {
++    width,
++    marginTop,
++    marginBottom,
++    xScale,
++    thickness,
++    minThickLiving = 22,        // v3: 7 → 22（每条 living 至少 22px 车道）
++    minThickHistorical = 16,    // v3: 5 → 16
++    laneGap = 18,               // v3: 3 → 18（车道间空白大幅加大）
++  } = opts;
+ 
+-  // 1. Build map: id -> children ids
++  // 1. Build children map
+   const childrenOf = new Map<string, string[]>();
+   for (const l of LANGUAGES) {
+     if (l.parent) {
+@@ -116,66 +121,82 @@
+     }
+   }
+ 
+-  // 2. Find roots
+-  const roots = LANGUAGES.filter((l) => !l.parent || !LANGUAGE_BY_ID.has(l.parent));
+-
+-  // 3. For each language compute "final" living timestamp
+-  //    Order leaves by family/branch/longitude
+   function isLeaf(id: string) {
+     return !childrenOf.has(id) || childrenOf.get(id)!.length === 0;
+   }
+ 
+   const leaves = LANGUAGES.filter((l) => isLeaf(l.id));
++
++  // 2. 排序：语系 → 分支 → 经度
+   const sortKey = (l: LanguageNode): number => {
+     const fOrder = FAMILY_ORDER.indexOf(l.family);
+     const bOrder = BRANCH_ORDER[l.branch ?? ""] ?? 99;
+-    const longitude = l.geo.lon;
+-    return fOrder * 1000 + bOrder * 10 + longitude / 360;
++    return fOrder * 1000 + bOrder * 10 + l.geo.lon / 360;
+   };
+   leaves.sort((a, b) => sortKey(a) - sortKey(b));
+ 
+-  // 4. Y position for each leaf (evenly distributed top → bottom)
++  // 3. 给每个 leaf 计算「车道高度」 = 峰值厚度 + gap
++  const laneHeight = new Map<string, number>();
++  for (const leaf of leaves) {
++    const peak = Math.max(
++      speakerAt(leaf, 2025),
++      speakerAt(leaf, leaf.died ?? 2025),
++      ...(leaf.speakers ?? []).map((s) => s.count),
++      1
++    );
++    const min = leaf.status === "living" ? minThickLiving : minThickHistorical;
++    const h = Math.max(min, thickness(peak));
++    laneHeight.set(leaf.id, h + laneGap);
++  }
++
++  // 4. 垂直堆叠 — 语系之间额外 gap
++  const FAMILY_BREAK_GAP = 48;   // v3: 8 → 48（语系之间留出明显分隔）
+   const yOf = new Map<string, number>();
+-  leaves.forEach((leaf, i) => {
+-    const y = marginTop + ((i + 0.5) / leaves.length) * usableHeight;
+-    yOf.set(leaf.id, y);
+-  });
++  let acc = marginTop;
++  let prevFamily: FamilyId | null = null;
++  for (const leaf of leaves) {
++    if (prevFamily && prevFamily !== leaf.family) acc += FAMILY_BREAK_GAP;
++    const h = laneHeight.get(leaf.id)!;
++    yOf.set(leaf.id, acc + h / 2);
++    acc += h;
++    prevFamily = leaf.family;
++  }
++  const totalHeight = Math.ceil(acc + marginBottom);
+ 
+-  // 5. For internal nodes, Y = weighted average of descendants' final speakers count
+-  function descendantsLeaves(id: string): LanguageNode[] {
++  // 5. 内部节点 Y = descendants 加权重心（按 modern speakers）
++  function descLeaves(id: string): LanguageNode[] {
+     if (isLeaf(id)) return [LANGUAGE_BY_ID.get(id)!];
+     const out: LanguageNode[] = [];
+-    for (const cid of childrenOf.get(id) ?? []) {
+-      out.push(...descendantsLeaves(cid));
+-    }
++    for (const cid of childrenOf.get(id) ?? []) out.push(...descLeaves(cid));
+     return out;
+   }
+-
+   for (const l of LANGUAGES) {
+     if (isLeaf(l.id)) continue;
+-    const descs = descendantsLeaves(l.id);
+-    if (descs.length === 0) { yOf.set(l.id, marginTop + usableHeight / 2); continue; }
++    const descs = descLeaves(l.id);
++    if (descs.length === 0) { yOf.set(l.id, marginTop + (totalHeight - marginTop - marginBottom) / 2); continue; }
+     let sumY = 0, sumW = 0;
+     for (const d of descs) {
+       const finalY = yOf.get(d.id)!;
+-      const finalCount = Math.log(Math.max(speakerAt(d, 2025), 1) + 1);
+-      sumY += finalY * finalCount;
+-      sumW += finalCount;
++      const w = Math.log(Math.max(speakerAt(d, 2025), 1) + 1);
++      sumY += finalY * w;
++      sumW += w;
+     }
+-    yOf.set(l.id, sumW > 0 ? sumY / sumW : marginTop + usableHeight / 2);
++    yOf.set(l.id, sumW > 0 ? sumY / sumW : marginTop + totalHeight / 2);
+   }
+ 
+-  // 6. Generate ribbon paths
+-  const STEP = 40; // years between samples for the smooth ribbon
++  // 6. 生成 ribbons
++  const STEP = 40;
+   const ribbons: LaneRibbon[] = [];
+-
+   for (const l of LANGUAGES) {
+     const born = l.born;
+     const died = l.died ?? 2026;
+     const startY = yOf.get(l.id)!;
+     const parentY = l.parent ? (yOf.get(l.parent) ?? startY) : startY;
+ 
+-    // Sample points
++    const isLiving = l.status === "living";
++    const isRecon = l.status === "reconstructed";
++    const minW = isLiving ? 4 : isRecon ? 1.5 : 2;
++
+     const samples: { year: number; y: number; w: number }[] = [];
+     const TRANSITION = Math.min(200, Math.max(80, (died - born) * 0.06));
+ 
+@@ -183,58 +204,59 @@
+       let cy = startY;
+       if (l.parent && y < born + TRANSITION) {
+         const t = (y - born) / TRANSITION;
+-        const ts = 0.5 - 0.5 * Math.cos(Math.PI * t); // smoothstep
++        const ts = 0.5 - 0.5 * Math.cos(Math.PI * t);
+         cy = parentY + (startY - parentY) * ts;
+       }
+       const count = speakerAt(l, y);
+-      let w = thickness(count);
+-      // taper start (smooth grow from 0)
++      let w = Math.max(minW, thickness(count));
++      // taper start
+       if (y < born + TRANSITION) {
+         const t = (y - born) / TRANSITION;
+         w *= Math.max(0.05, t);
+       }
+-      // taper end if extinct
++      // taper end (only for died / extinct)
+       if (l.died && y > died - TRANSITION) {
+         const t = (died - y) / TRANSITION;
+         w *= Math.max(0.05, t);
+       }
+       samples.push({ year: y, y: cy, w });
+     }
+-    // Make sure we hit died exactly
+     if (samples.length === 0 || samples[samples.length - 1].year < died) {
+       let cy = startY;
+-      let w = thickness(speakerAt(l, died));
++      let w = Math.max(minW, thickness(speakerAt(l, died)));
+       if (l.died) w *= 0.05;
+       samples.push({ year: died, y: cy, w });
+     }
+ 
+-    // Build SVG path: upper curve forward + lower curve backward
++    // build path
+     const top: [number, number][] = samples.map((s) => [xScale(s.year), s.y - s.w / 2]);
+     const bot: [number, number][] = samples.map((s) => [xScale(s.year), s.y + s.w / 2]);
+ 
+-    const path = `M ${top[0][0]},${top[0][1]} ` +
+-      top.slice(1).map(([x, y], i) => {
+-        const px = top[i][0], py = top[i][1];
+-        const cx = (px + x) / 2;
+-        return `C ${cx},${py} ${cx},${y} ${x},${y}`;
+-      }).join(" ") +
+-      ` L ${bot[bot.length - 1][0]},${bot[bot.length - 1][1]} ` +
+-      bot.slice(0, -1).reverse().map(([x, y], i, arr) => {
+-        const idx = bot.length - 1 - i;
+-        const px = bot[idx][0], py = bot[idx][1];
+-        const cx = (px + x) / 2;
+-        return `C ${cx},${py} ${cx},${y} ${x},${y}`;
+-      }).join(" ") +
+-      ` Z`;
+-
+-    const centerPath = `M ${xScale(samples[0].year)},${samples[0].y} ` +
+-      samples.slice(1).map((s, i) => {
+-        const ps = samples[i];
+-        const px = xScale(ps.year), py = ps.y;
+-        const x = xScale(s.year), y = s.y;
+-        const cx = (px + x) / 2;
+-        return `C ${cx},${py} ${cx},${y} ${x},${y}`;
+-      }).join(" ");
++    let path = `M ${top[0][0]},${top[0][1]} `;
++    for (let i = 1; i < top.length; i++) {
++      const px = top[i - 1][0], py = top[i - 1][1];
++      const [x, y] = top[i];
++      const cx = (px + x) / 2;
++      path += `C ${cx},${py} ${cx},${y} ${x},${y} `;
++    }
++    path += `L ${bot[bot.length - 1][0]},${bot[bot.length - 1][1]} `;
++    for (let i = bot.length - 2; i >= 0; i--) {
++      const px = bot[i + 1][0], py = bot[i + 1][1];
++      const [x, y] = bot[i];
++      const cx = (px + x) / 2;
++      path += `C ${cx},${py} ${cx},${y} ${x},${y} `;
++    }
++    path += "Z";
++
++    let centerPath = `M ${xScale(samples[0].year)},${samples[0].y} `;
++    for (let i = 1; i < samples.length; i++) {
++      const ps = samples[i - 1];
++      const s = samples[i];
++      const px = xScale(ps.year), py = ps.y;
++      const x = xScale(s.year), y = s.y;
++      const cx = (px + x) / 2;
++      centerPath += `C ${cx},${py} ${cx},${y} ${x},${y} `;
++    }
+ 
+     ribbons.push({
+       id: l.id,
+@@ -249,15 +271,16 @@
+       yStart: startY,
+       yEnd: startY,
+       parent: l.parent,
++      modernThickness: samples[samples.length - 1].w,
+     });
+   }
+ 
+-  return ribbons;
++  return { ribbons, totalHeight };
+ }
+ 
+-// 默认厚度函数：log scale，min 0.6 px, max ~30 px
++// 默认厚度函数：log10 scale
+ export function defaultThickness(speakers: number): number {
+   const v = Math.log10(Math.max(speakers, 100));
+-  // log10(100) = 2, log10(1.5B) ≈ 9.2
++  // log10(100)=2 → 0.6;  log10(1.5B)=9.18 → ~32
+   return Math.max(0.6, (v - 2) * 4.5);
+ }
+--- a/app/components/RiverChart.tsx
++++ b/app/components/RiverChart.tsx
+@@ -1,12 +1,14 @@
+ "use client";
+-import { useMemo, useRef, useState, useEffect, useCallback } from "react";
+-import { LANGUAGES, LANGUAGE_BY_ID, CONTACTS, speakerAt } from "@/lib/data";
++import { useMemo } from "react";
++import { LANGUAGES, LANGUAGE_BY_ID, CONTACTS } from "@/lib/data";
+ import { computeLayout, makeXScale, defaultThickness, X_TICKS, type LaneRibbon } from "@/lib/layout";
+-import { FAMILY_META, type FamilyId, type LanguageNode } from "@/lib/types";
++import { FAMILY_META, type FamilyId } from "@/lib/types";
+ 
+ interface Props {
+   width: number;
+-  height: number;
++  /** 最小可视高度（容器高度），SVG 自身高度会动态变大、容器 overflow-y scroll */
++  minHeight: number;
++  isMobile?: boolean;
+   hoveredId: string | null;
+   selectedId: string | null;
+   setHoveredId: (id: string | null) => void;
+@@ -15,7 +17,9 @@
+   enabledFamilies: Set<FamilyId>;
+ }
+ 
+-const MARGIN = { top: 30, right: 30, bottom: 60, left: 110 };
++// v3: 左侧标签栏更宽（桌面 220，手机 140），右侧 200 容纳长 living-language 名字
++const DESKTOP_MARGIN = { top: 40, right: 200, bottom: 70, left: 220 };
++const MOBILE_MARGIN  = { top: 40, right: 170, bottom: 70, left: 140 };
+ 
+ const EVENTS: { year: number; label: { zh: string; en: string } }[] = [
+   { year: -3200, label: { zh: "楔形文字", en: "Cuneiform" } },
+@@ -28,9 +32,18 @@
+   { year: 1928, label: { zh: "土耳其拉丁化", en: "Turkish Latinization" } },
+ ];
+ 
++// 把过长的中文名拆 2 行（按字数）
++function splitLongName(name: string, max = 6): string[] {
++  if (name.length <= max) return [name];
++  // 找一个合理切点（偏中间、汉字处）
++  const cut = Math.ceil(name.length / 2);
++  return [name.slice(0, cut), name.slice(cut)];
++}
++
+ export default function RiverChart({
+   width,
+-  height,
++  minHeight,
++  isMobile = false,
+   hoveredId,
+   selectedId,
+   setHoveredId,
+@@ -38,12 +51,13 @@
+   showContacts,
+   enabledFamilies,
+ }: Props) {
+-  const xScale = useMemo(() => makeXScale(width, MARGIN.left, MARGIN.right), [width]);
+-  const ribbons = useMemo(
++  const MARGIN = isMobile ? MOBILE_MARGIN : DESKTOP_MARGIN;
++  const xScale = useMemo(() => makeXScale(width, MARGIN.left, MARGIN.right), [width, MARGIN.left, MARGIN.right]);
++
++  const { ribbons, totalHeight } = useMemo(
+     () =>
+       computeLayout({
+         width,
+-        height,
+         marginLeft: MARGIN.left,
+         marginRight: MARGIN.right,
+         marginTop: MARGIN.top,
+@@ -51,27 +65,32 @@
+         xScale,
+         thickness: defaultThickness,
+       }),
+-    [width, height, xScale]
++    [width, xScale, MARGIN.left, MARGIN.right, MARGIN.top, MARGIN.bottom]
+   );
+ 
++  // SVG 实际高度 = max(容器最小高度, 计算出的总高度)
++  const svgHeight = Math.max(minHeight, totalHeight);
++
++  // 部署调试用 — 浏览器 console 能看到当前布局尺寸
++  if (typeof window !== "undefined") {
++    (window as any).__riverLayout = { width, totalHeight, svgHeight, ribbonCount: ribbons.length, MARGIN };
++  }
++
+   const ribbonsById = useMemo(() => {
+     const m = new Map<string, LaneRibbon>();
+     for (const r of ribbons) m.set(r.id, r);
+     return m;
+   }, [ribbons]);
+ 
+-  // 决定要高亮哪些 id (selected + 其祖先 + 子孙)
+   const focusIds = useMemo(() => {
+     const id = hoveredId ?? selectedId;
+     if (!id) return null;
+     const out = new Set<string>([id]);
+-    // 祖先
+     let cur = LANGUAGE_BY_ID.get(id);
+     while (cur && cur.parent) {
+       out.add(cur.parent);
+       cur = LANGUAGE_BY_ID.get(cur.parent);
+     }
+-    // 子孙
+     function addDesc(pid: string) {
+       for (const l of LANGUAGES) {
+         if (l.parent === pid) {
+@@ -84,14 +103,17 @@
+     return out;
+   }, [hoveredId, selectedId]);
+ 
+-  function familyColor(f: FamilyId, alpha = 1): string {
+-    const c = FAMILY_META[f].color;
+-    if (alpha === 1) return c;
+-    return c + Math.round(alpha * 255).toString(16).padStart(2, "0");
++  function familyColor(f: FamilyId): string {
++    return FAMILY_META[f].color;
+   }
+ 
+   return (
+-    <svg width={width} height={height} className="select-none">
++    <svg
++      width={width}
++      height={svgHeight}
++      viewBox={`0 0 ${width} ${svgHeight}`}
++      className="select-none block"
++    >
+       <defs>
+         <linearGradient id="bg-gradient" x1="0" y1="0" x2="1" y2="0">
+           <stop offset="0" stopColor="#F5EFE2" stopOpacity="0.4" />
+@@ -105,16 +127,16 @@
+         ))}
+       </defs>
+ 
+-      {/* 时间轴底色 */}
++      {/* 底色 */}
+       <rect
+         x={MARGIN.left}
+         y={MARGIN.top}
+         width={width - MARGIN.left - MARGIN.right}
+-        height={height - MARGIN.top - MARGIN.bottom}
++        height={svgHeight - MARGIN.top - MARGIN.bottom}
+         fill="url(#bg-gradient)"
+       />
+ 
+-      {/* 大历史事件竖线 */}
++      {/* 历史事件竖线 */}
+       <g className="events">
+         {EVENTS.map((e) => (
+           <g key={e.year}>
+@@ -122,18 +144,18 @@
+               x1={xScale(e.year)}
+               x2={xScale(e.year)}
+               y1={MARGIN.top}
+-              y2={height - MARGIN.bottom + 4}
++              y2={svgHeight - MARGIN.bottom + 4}
+               stroke="#C4A05A"
+               strokeWidth={0.5}
+               strokeDasharray="2 4"
+-              opacity={0.6}
++              opacity={0.55}
+             />
+             <text
+               x={xScale(e.year)}
+-              y={MARGIN.top - 10}
++              y={MARGIN.top - 12}
+               textAnchor="middle"
+               fontSize={10}
+-              fontFamily="'Cormorant Garamond', serif"
++              fontFamily="'Cormorant Garamond', 'Noto Serif SC', serif"
+               fill="#8A6A28"
+               fontStyle="italic"
+             >
+@@ -158,9 +180,9 @@
+                 hoveredId === r.id || selectedId === r.id ? "river-highlight" : ""
+               }`}
+               fill={`url(#grad-${r.family})`}
+-              opacity={isReconstructed ? 0.45 : isExtinct ? 0.7 : 0.92}
++              opacity={isReconstructed ? 0.45 : isExtinct ? 0.72 : 0.92}
+               stroke={familyColor(r.family)}
+-              strokeWidth={selectedId === r.id ? 1.4 : 0.4}
++              strokeWidth={selectedId === r.id ? 1.6 : 0.4}
+               strokeOpacity={0.5}
+               strokeDasharray={isReconstructed ? "3 3" : undefined}
+               onMouseEnter={() => setHoveredId(r.id)}
+@@ -168,14 +190,14 @@
+               onClick={() => setSelectedId(selectedId === r.id ? null : r.id)}
+             >
+               <title>
+-                {r.name.zh} {r.name.en}
++                {r.name.zh} · {r.name.en}
+               </title>
+             </path>
+           );
+         })}
+       </g>
+ 
+-      {/* 借用虚线 (contacts) */}
++      {/* 借用虚线 */}
+       {showContacts && (
+         <g className="contacts">
+           {CONTACTS.map((c) => {
+@@ -186,7 +208,7 @@
+             const x = xScale(c.year);
+             const y1 = src.yStart;
+             const y2 = tgt.yStart;
+-            const cx = x + 30;
++            const cx = x + 32;
+             const isFocus = !focusIds || focusIds.has(c.source) || focusIds.has(c.target);
+             return (
+               <path
+@@ -196,51 +218,93 @@
+                 fill="none"
+                 stroke="#8A6A28"
+                 strokeWidth={c.strength === 2 ? 1.2 : 0.7}
+-                opacity={isFocus ? 0.45 : 0.08}
++                opacity={isFocus ? 0.5 : 0.08}
+               />
+             );
+           })}
+         </g>
+       )}
+ 
+-      {/* 现代语言 label */}
++      {/* 语言标签 — 右端 living / inline 灭绝 */}
+       <g className="labels">
+         {ribbons.map((r) => {
+           if (!enabledFamilies.has(r.family)) return null;
+-          if (r.status === "reconstructed") return null;
++          if (r.status === "reconstructed") {
++            // 拟构语：左端 italic 标
++            return (
++              <text
++                key={r.id}
++                x={xScale(r.born) + 4}
++                y={r.yStart}
++                fontSize={9}
++                fontStyle="italic"
++                fontFamily="'Cormorant Garamond', 'Noto Serif SC', serif"
++                fill="#5C5247"
++                opacity={focusIds && !focusIds.has(r.id) ? 0.18 : 0.85}
++                dominantBaseline="middle"
++                pointerEvents="none"
++              >
++                * {r.name.zh}
++              </text>
++            );
++          }
+           if (r.died < 2020) {
+-            // 灭绝语言 — label 在 died 处
++            // 灭绝语言：标在 died 处（inline）
+             return (
+               <text
+                 key={r.id}
+                 x={xScale(r.died) + 4}
+                 y={r.yStart}
+-                fontSize={8.5}
+-                fontFamily="'Cormorant Garamond', 'Noto Serif SC', serif"
++                fontSize={9.5}
++                fontFamily="'Noto Serif SC', 'Cormorant Garamond', serif"
+                 fontStyle="italic"
+                 fill="#5C5247"
+-                opacity={focusIds && !focusIds.has(r.id) ? 0.15 : 0.7}
++                opacity={focusIds && !focusIds.has(r.id) ? 0.15 : 0.78}
++                dominantBaseline="middle"
+                 pointerEvents="none"
+               >
+                 † {r.name.zh}
+               </text>
+             );
+           }
+-          // living: label 在右
++          // v3: 桌面 right margin 200 单行装得下大多数名字，不再硬拆 2 行；mobile 还按 6 字拆
++          const lines = isMobile ? splitLongName(r.name.zh, 6) : [r.name.zh];
++          const isHighlighted = hoveredId === r.id || selectedId === r.id;
+           return (
+-            <text
+-              key={r.id}
+-              x={width - MARGIN.right + 4}
+-              y={r.yStart}
+-              fontSize={9}
+-              fontFamily="'Noto Serif SC', 'Cormorant Garamond', serif"
+-              fill="#3A332A"
+-              opacity={focusIds && !focusIds.has(r.id) ? 0.18 : 0.95}
+-              dominantBaseline="middle"
+-              pointerEvents="none"
+-            >
+-              {r.name.zh}
+-            </text>
++            <g key={r.id}>
++              {lines.map((line, i) => (
++                <text
++                  key={i}
++                  x={width - MARGIN.right + 8}
++                  y={r.yStart + (i - (lines.length - 1) / 2) * 13}
++                  fontSize={isHighlighted ? 14 : 12}   /* v3: 10→12 default, 11.5→14 highlight */
++                  fontFamily="'Noto Serif SC', 'Cormorant Garamond', serif"
++                  fill={isHighlighted ? familyColor(r.family) : "#3A332A"}
++                  fontWeight={isHighlighted ? 600 : 400}
++                  opacity={focusIds && !focusIds.has(r.id) ? 0.18 : 0.95}
++                  dominantBaseline="middle"
++                  pointerEvents="none"
++                >
++                  {line}
++                </text>
++              ))}
++              {/* 英文副名（hover/select 时显示） */}
++              {isHighlighted && (
++                <text
++                  x={width - MARGIN.right + 8}
++                  y={r.yStart + ((lines.length) / 2) * 13 + 4}
++                  fontSize={10}
++                  fontStyle="italic"
++                  fontFamily="'Cormorant Garamond', serif"
++                  fill={familyColor(r.family)}
++                  opacity={0.75}
++                  dominantBaseline="middle"
++                  pointerEvents="none"
++                >
++                  {r.name.en}
++                </text>
++              )}
++            </g>
+           );
+         })}
+       </g>
+@@ -250,8 +314,8 @@
+         <line
+           x1={MARGIN.left}
+           x2={width - MARGIN.right}
+-          y1={height - MARGIN.bottom + 1}
+-          y2={height - MARGIN.bottom + 1}
++          y1={svgHeight - MARGIN.bottom + 1}
++          y2={svgHeight - MARGIN.bottom + 1}
+           stroke="#5C5247"
+           strokeWidth={0.6}
+         />
+@@ -260,14 +324,14 @@
+             <line
+               x1={xScale(y)}
+               x2={xScale(y)}
+-              y1={height - MARGIN.bottom + 1}
+-              y2={height - MARGIN.bottom + 6}
++              y1={svgHeight - MARGIN.bottom + 1}
++              y2={svgHeight - MARGIN.bottom + 6}
+               stroke="#5C5247"
+               strokeWidth={0.6}
+             />
+             <text
+               x={xScale(y)}
+-              y={height - MARGIN.bottom + 22}
++              y={svgHeight - MARGIN.bottom + 22}
+               textAnchor="middle"
+               fontSize={11}
+               fontFamily="'Cormorant Garamond', serif"
+@@ -279,31 +343,32 @@
+         ))}
+       </g>
+ 
+-      {/* 语系标注（左侧） */}
++      {/* 左侧语系标 — v3: 字号增大 + 宽空间 */}
+       <g className="family-labels">
+-        {Array.from(FAMILY_META.entries() as any).map(([key, meta]: any) => {
+-          // 找该语系所有 ribbon 的 yStart 范围
+-          const ys = ribbons.filter((r) => r.family === key && enabledFamilies.has(key)).map((r) => r.yStart);
++        {(Object.entries(FAMILY_META) as [FamilyId, typeof FAMILY_META[FamilyId]][]).map(([key, meta]) => {
++          if (!enabledFamilies.has(key)) return null;
++          const ys = ribbons.filter((r) => r.family === key).map((r) => r.yStart);
+           if (ys.length === 0) return null;
+           const minY = Math.min(...ys), maxY = Math.max(...ys);
+           const midY = (minY + maxY) / 2;
+           return (
+             <g key={key}>
+               <line
+-                x1={MARGIN.left - 14}
+-                x2={MARGIN.left - 14}
+-                y1={minY - 4}
+-                y2={maxY + 4}
++                x1={MARGIN.left - 20}
++                x2={MARGIN.left - 20}
++                y1={minY - 6}
++                y2={maxY + 6}
+                 stroke={meta.color}
+-                strokeWidth={2}
+-                opacity={0.7}
++                strokeWidth={2.6}
++                opacity={0.75}
++                strokeLinecap="round"
+               />
+               <text
+-                x={MARGIN.left - 22}
+-                y={midY}
++                x={MARGIN.left - 30}
++                y={midY - 8}
+                 textAnchor="end"
+-                fontSize={11}
+-                fontFamily="'Noto Serif SC', 'Cormorant Garamond', serif"
++                fontSize={isMobile ? 13 : 16}   /* v3: 13→16 desktop */
++                fontFamily="'Noto Serif SC', serif"
+                 fill={meta.color}
+                 fontWeight={600}
+                 dominantBaseline="middle"
+@@ -311,14 +376,14 @@
+                 {meta.zh}
+               </text>
+               <text
+-                x={MARGIN.left - 22}
+-                y={midY + 12}
++                x={MARGIN.left - 30}
++                y={midY + 10}
+                 textAnchor="end"
+-                fontSize={8}
++                fontSize={isMobile ? 9.5 : 11}   /* v3: 9.5→11 desktop */
+                 fontStyle="italic"
+                 fontFamily="'Cormorant Garamond', serif"
+                 fill={meta.color}
+-                opacity={0.6}
++                opacity={0.75}
+                 dominantBaseline="middle"
+               >
+                 {meta.en}
+@@ -331,7 +396,7 @@
+       {/* 标题 */}
+       <text
+         x={MARGIN.left}
+-        y={20}
++        y={24}
+         fontSize={14}
+         fontFamily="'Cormorant Garamond', serif"
+         fontStyle="italic"
+--- a/app/components/App.tsx
++++ b/app/components/App.tsx
+@@ -8,7 +8,7 @@
+ 
+ export default function App() {
+   const containerRef = useRef<HTMLDivElement>(null);
+-  const [size, setSize] = useState({ width: 1200, height: 700 });
++  const [size, setSize] = useState({ width: 1200, minHeight: 700 });
+   const [hoveredId, setHoveredId] = useState<string | null>(null);
+   const [selectedId, setSelectedId] = useState<string | null>(null);
+   const [mode, setMode] = useState<"language" | "script">("language");
+@@ -17,7 +17,6 @@
+     new Set(Object.keys(FAMILY_META) as FamilyId[])
+   );
+   const [isMobile, setIsMobile] = useState(false);
+-  const [sheetOpen, setSheetOpen] = useState(false);
+ 
+   useEffect(() => {
+     function onResize() {
+@@ -26,8 +25,8 @@
+       setIsMobile(w < 768);
+       const detailW = w >= 1024 ? 340 : 0;
+       setSize({
+-        width: Math.max(640, w - detailW - 2),
+-        height: Math.max(480, h - 60 - 2),
++        width: Math.max(720, w - detailW - 2),
++        minHeight: Math.max(500, h - 60 - 2),
+       });
+     }
+     onResize();
+@@ -45,10 +44,9 @@
+ 
+   const focusId = hoveredId ?? selectedId;
+ 
+-  // 自动弹出移动 sheet
+-  useEffect(() => {
+-    if (isMobile && selectedId) setSheetOpen(true);
+-  }, [selectedId, isMobile]);
++  // Mobile: 总宽度更宽（横向滚动），最小高度由 layout 算法决定
++  const chartWidth = isMobile ? 1700 : size.width;
++  const chartMinHeight = isMobile ? 1200 : size.minHeight;
+ 
+   return (
+     <div ref={containerRef} className="h-screen w-screen overflow-hidden flex flex-col bg-cream-50">
+@@ -61,13 +59,17 @@
+         toggleFamily={toggleFamily}
+       />
+ 
+-      <div className="flex-1 flex overflow-hidden">
+-        {/* 主图 */}
+-        <div className={`flex-1 overflow-auto ${isMobile ? "overflow-x-scroll" : ""}`}>
++      <div className="flex-1 flex min-h-0 overflow-hidden">
++        {/* 主图区：双向滚动（X 时间 + Y 语系堆叠） — overflow-auto 关键 */}
++        <div
++          className="flex-1 overflow-auto min-h-0"
++          style={{ maxHeight: "calc(100vh - 60px)" }}
++        >
+           {mode === "language" ? (
+             <RiverChart
+-              width={isMobile ? 1600 : size.width}
+-              height={isMobile ? Math.max(800, size.height) : size.height}
++              width={chartWidth}
++              minHeight={chartMinHeight}
++              isMobile={isMobile}
+               hoveredId={hoveredId}
+               selectedId={selectedId}
+               setHoveredId={setHoveredId}
+@@ -77,42 +79,52 @@
+             />
+           ) : (
+             <ScriptTree
+-              width={isMobile ? 1600 : size.width}
+-              height={isMobile ? 1400 : size.height}
++              width={chartWidth}
++              height={isMobile ? 1400 : size.minHeight}
+             />
+           )}
+         </div>
+ 
+         {/* Desktop 右侧详情 */}
+         {!isMobile && (
+-          <aside className="hidden lg:block w-[340px] border-l border-cream-200 bg-cream-50 overflow-hidden">
++          <aside className="hidden lg:block w-[340px] border-l border-cream-200 bg-cream-50 overflow-hidden shrink-0">
+             <DetailPanel id={focusId} />
+           </aside>
+         )}
+       </div>
+ 
+-      {/* 移动端底部 sheet */}
++      {/* Mobile 底部 sheet */}
+       {isMobile && (
+-        <div
+-          className={`fixed left-0 right-0 bg-cream-50 border-t border-cream-200 shadow-2xl transition-all duration-300 ${
+-            sheetOpen ? "bottom-0 h-[60vh]" : "bottom-0 h-12"
+-          }`}
+-        >
+-          <button
+-            className="w-full"
+-            onClick={() => setSheetOpen((v) => !v)}
+-            aria-label={sheetOpen ? "Close detail" : "Open detail"}
+-          >
+-            <div className="sheet-handle" />
+-            <p className="text-[10px] uppercase tracking-wider2 text-gilt-500 pb-1">
+-              {focusId ? "详情 ▼" : "选择语言后弹出详情"}
+-            </p>
+-          </button>
+-          {sheetOpen && (
+-            <div className="h-[calc(60vh-44px)] overflow-y-auto">
+-              <DetailPanel id={focusId} />
+-            </div>
+-          )}
++        <MobileSheet focusId={focusId} />
++      )}
++    </div>
++  );
++}
++
++function MobileSheet({ focusId }: { focusId: string | null }) {
++  const [open, setOpen] = useState(false);
++  useEffect(() => {
++    if (focusId) setOpen(true);
++  }, [focusId]);
++  return (
++    <div
++      className={`fixed left-0 right-0 bg-cream-50 border-t border-cream-200 shadow-2xl transition-all duration-300 z-50 ${
++        open ? "bottom-0 h-[60vh]" : "bottom-0 h-12"
++      }`}
++    >
++      <button
++        className="w-full"
++        onClick={() => setOpen((v) => !v)}
++        aria-label={open ? "Close detail" : "Open detail"}
++      >
++        <div className="sheet-handle" />
++        <p className="text-[10px] uppercase tracking-wider2 text-gilt-500 pb-1">
++          {focusId ? "详情 ▼" : "选择语言后弹出详情"}
++        </p>
++      </button>
++      {open && (
++        <div className="h-[calc(60vh-44px)] overflow-y-auto">
++          <DetailPanel id={focusId} />
+         </div>
+       )}
+     </div>

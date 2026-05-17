@@ -1,0 +1,58 @@
+{
+  "name": "rivers-of-language",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Interactive visualization of how the world's 7 major language families evolved over 8000 years — Indo-European, Sino-Tibetan, Afro-Asiatic, Niger-Congo, Austronesian, Dravidian, Turkic.",
+  "homepage": "https://rivers-of-language.vercel.app",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/huodebing-alt/rivers-of-language.git"
+  },
+  "license": "MIT",
+  "keywords": [
+    "language",
+    "linguistics",
+    "language-family",
+    "language-tree",
+    "etymology",
+    "proto-indo-european",
+    "sino-tibetan",
+    "historical-linguistics",
+    "phylogeny",
+    "d3",
+    "visualization",
+    "education"
+  ],
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "ingest:glottolog": "tsx scripts/fetch-glottolog.ts",
+    "ingest:wikidata": "tsx scripts/fetch-wikidata.ts",
+    "ingest:wiktionary": "tsx scripts/fetch-wiktionary.ts",
+    "ingest:merge": "tsx scripts/merge.ts",
+    "ingest:all": "npm run ingest:glottolog && npm run ingest:wikidata && npm run ingest:merge"
+  },
+  "dependencies": {
+    "next": "14.2.5",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "d3": "^7.9.0",
+    "topojson-client": "^3.1.0"
+  },
+  "devDependencies": {
+    "@types/d3": "^7.4.3",
+    "@types/node": "^20.14.10",
+    "@types/react": "18.3.3",
+    "@types/react-dom": "18.3.0",
+    "@types/topojson-client": "^3.1.5",
+    "autoprefixer": "^10.4.19",
+    "eslint": "8.57.0",
+    "eslint-config-next": "14.2.5",
+    "postcss": "^8.4.39",
+    "tailwindcss": "^3.4.6",
+    "tsx": "^4.16.2",
+    "typescript": "^5.5.3"
+  }
+}
