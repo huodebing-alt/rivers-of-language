@@ -17,6 +17,12 @@
 import { LANGUAGES, LANGUAGE_BY_ID, speakerAt } from "./data";
 import type { FamilyId, LanguageNode } from "./types";
 
+export interface RibbonSample {
+  x: number;       // 已 xScale 处理过
+  y: number;       // 中心线 y
+  w: number;       // 当前厚度
+}
+
 export interface LaneRibbon {
   id: string;
   name: { zh: string; en: string };
@@ -35,6 +41,8 @@ export interface LaneRibbon {
   collapsible: boolean;
   collapsed: boolean;
   descendantCount: number;
+  /** 采样点（含 xScale 后坐标），供 hover wave 动画使用 */
+  samples: RibbonSample[];
 }
 
 export interface LayoutResult {
@@ -57,12 +65,11 @@ export interface LayoutOptions {
   enabledFamilies?: Set<FamilyId>;
 }
 
-// =================== v5 thickness ===================
-// log scale 强对比版
-const TH_MIN = 4;
-const TH_MAX = 70;
-const TH_LOG_MIN = Math.log10(100);     // 100 speakers = 4px
-const TH_LOG_MAX = Math.log10(2e9);     // 2B speakers = 70px
+// =================== v6 thickness — 1/3 of v5 ===================
+const TH_MIN = 2;                       // v5: 4 → v6: 2
+const TH_MAX = 23;                      // v5: 70 → v6: 23 (~v5÷3)
+const TH_LOG_MIN = Math.log10(100);
+const TH_LOG_MAX = Math.log10(2e9);
 
 export function defaultThickness(speakers: number): number {
   const s = Math.max(speakers, 100);
@@ -71,13 +78,13 @@ export function defaultThickness(speakers: number): number {
   return TH_MIN + (TH_MAX - TH_MIN) * t;
 }
 
-// =================== v5 gap constants ===================
-const CONSTANT_GAP = 8;      // ribbon 边缘之间恒定空白
-const FAMILY_GAP = 36;       // 语系之间额外空白
-const NOISE_FREQ_CENTER = 0.0008;    // 中心线波浪频率 (~2 个波 over 8000y)
-const NOISE_FREQ_THICK  = 0.0015;
-const NOISE_AMP_RATIO   = 0.35;      // amplitude 不超 gap/2 的 35%
-const NOISE_THICK_PCT   = 0.10;      // 厚度波动 ±10%
+// =================== gap & noise ===================
+const CONSTANT_GAP = 8;
+const FAMILY_GAP = 36;
+const NOISE_FREQ_CENTER = 0.0009;
+const NOISE_FREQ_THICK  = 0.0017;
+const NOISE_AMP_PX      = 2.5;          // v5: 1.4 → v6: 2.5（绝对像素，更明显）
+const NOISE_THICK_PCT   = 0.18;         // v5: 0.10 → v6: 0.18 厚度起伏更明显
 
 // 简易确定性 hash → 给每条河独立 phase
 function hashStr(s: string): number {
@@ -260,8 +267,8 @@ export function computeLayout(opts: LayoutOptions): LayoutResult {
   }
 
   // -------- 生成 ribbons —— 加 noise wave + thickness 变化 --------
-  const STEP = 35;
-  const noiseAmp = (CONSTANT_GAP / 2) * NOISE_AMP_RATIO; // 约 1.4px — 看起来微微弯但不重叠
+  const STEP = 30;
+  const noiseAmp = NOISE_AMP_PX;
   const ribbons: LaneRibbon[] = [];
   let thickSum = 0;
 
@@ -361,6 +368,13 @@ export function computeLayout(opts: LayoutOptions): LayoutResult {
     const peak = peakThick.get(l.id) ?? Math.max(...samples.map((s) => s.w));
     thickSum += peak;
 
+    // 把 samples 转成已 xScale 处理过的坐标数组（供 hover wave 用）
+    const ribbonSamples: RibbonSample[] = samples.map((s) => ({
+      x: xScale(s.year),
+      y: s.y,
+      w: s.w,
+    }));
+
     ribbons.push({
       id: l.id,
       name: l.name,
@@ -379,6 +393,7 @@ export function computeLayout(opts: LayoutOptions): LayoutResult {
       collapsible,
       collapsed,
       descendantCount: countAllDesc(l.id),
+      samples: ribbonSamples,
     });
   }
 

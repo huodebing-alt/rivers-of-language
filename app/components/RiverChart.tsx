@@ -8,8 +8,75 @@ import {
   X_TICKS,
   EVENTS,
   type LaneRibbon,
+  type RibbonSample,
 } from "@/lib/layout";
 import { FAMILY_META, type FamilyId } from "@/lib/types";
+
+// ===== Wave glyph helpers =====
+// Deterministic small RNG seeded by string
+function hashStr(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+  return h >>> 0;
+}
+function mulberry32(seed: number) {
+  return function () {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = seed;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function sampleAt(samples: RibbonSample[], x: number): RibbonSample {
+  if (samples.length === 0) return { x, y: 0, w: 0 };
+  if (x <= samples[0].x) return samples[0];
+  if (x >= samples[samples.length - 1].x) return samples[samples.length - 1];
+  for (let i = 0; i < samples.length - 1; i++) {
+    if (x >= samples[i].x && x <= samples[i + 1].x) {
+      const t = (x - samples[i].x) / Math.max(1e-6, samples[i + 1].x - samples[i].x);
+      return {
+        x,
+        y: samples[i].y + (samples[i + 1].y - samples[i].y) * t,
+        w: samples[i].w + (samples[i + 1].w - samples[i].w) * t,
+      };
+    }
+  }
+  return samples[samples.length - 1];
+}
+
+interface Wave { x: number; y: number; h: number; a: number; sw: number; op: number }
+
+function generateWaves(samples: RibbonSample[], seed: string): Wave[] {
+  if (samples.length < 2) return [];
+  const out: Wave[] = [];
+  const rng = mulberry32(hashStr(seed));
+  const minX = samples[0].x;
+  const maxX = samples[samples.length - 1].x;
+  let x = minX + 6 + rng() * 12;
+  while (x < maxX - 4) {
+    const s = sampleAt(samples, x);
+    if (s.w >= 1.4) {
+      // glyph height = 60-75% of local ribbon thickness, clamped to a sane range
+      const ratio = 0.55 + rng() * 0.25;
+      const h = Math.max(2.6, Math.min(s.w * ratio, 14));
+      const a = 0.9 + rng() * 1.8;             // amplitude 0.9 - 2.7
+      const sign = rng() < 0.5 ? -1 : 1;
+      const sw = 0.55 + rng() * 0.55;          // stroke width 0.55-1.1
+      const op = 0.55 + rng() * 0.30;          // opacity 0.55-0.85
+      const yJitter = (rng() - 0.5) * Math.min(s.w * 0.18, 1.5);
+      out.push({ x, y: s.y + yJitter, h, a: a * sign, sw, op });
+    }
+    x += 26 + rng() * 16;                       // spacing 26-42
+  }
+  return out;
+}
+
+function waveGlyphPath(w: Wave): string {
+  // 小垂直 S 曲线：M cx,y-h/2  C cx+a,y-h/3  cx-a,y+h/3  cx,y+h/2
+  const { x, y, h, a } = w;
+  return `M ${x.toFixed(2)},${(y - h / 2).toFixed(2)} C ${(x + a).toFixed(2)},${(y - h / 3).toFixed(2)} ${(x - a).toFixed(2)},${(y + h / 3).toFixed(2)} ${x.toFixed(2)},${(y + h / 2).toFixed(2)}`;
+}
 
 interface Props {
   width: number;
@@ -262,20 +329,33 @@ export default function RiverChart(props: Props) {
                     </title>
                   </path>
 
-                  {/* v5: hover/selected 流水高光 — center line stroke with moving dashes */}
-                  {isHighlighted && (
-                    <path
-                      d={r.centerPath}
-                      fill="none"
-                      stroke="white"
-                      strokeOpacity={0.85}
-                      strokeWidth={Math.max(6, r.peakThickness * 0.55)}
-                      strokeLinecap="round"
-                      strokeDasharray="22 80"
-                      className="river-flow"
-                      pointerEvents="none"
-                    />
-                  )}
+                  {/* v6: hover/selected 流水高光 — 手绘感垂直波浪线 + 横向流动 */}
+                  {isHighlighted && (() => {
+                    const waves = generateWaves(r.samples, r.id);
+                    if (waves.length === 0) return null;
+                    return (
+                      <g pointerEvents="none">
+                        <defs>
+                          <clipPath id={`wave-clip-${r.id}`}>
+                            <path d={r.path} />
+                          </clipPath>
+                        </defs>
+                        <g clipPath={`url(#wave-clip-${r.id})`} className="river-waves">
+                          {waves.map((wv, i) => (
+                            <path
+                              key={i}
+                              d={waveGlyphPath(wv)}
+                              fill="none"
+                              stroke="white"
+                              strokeWidth={wv.sw}
+                              strokeLinecap="round"
+                              opacity={wv.op}
+                            />
+                          ))}
+                        </g>
+                      </g>
+                    );
+                  })()}
                 </g>
               );
             })}

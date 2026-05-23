@@ -9,3 +9,4 @@ data/glottolog.json
 data/wikidata-langs.json
 data/wiktionary-etym.json
 data/languages.merged.json
+.vercel

@@ -1,0 +1,255 @@
+--- a/lib/layout.ts
++++ b/lib/layout.ts
+@@ -17,6 +17,12 @@
+ import { LANGUAGES, LANGUAGE_BY_ID, speakerAt } from "./data";
+ import type { FamilyId, LanguageNode } from "./types";
+ 
++export interface RibbonSample {
++  x: number;       // 已 xScale 处理过
++  y: number;       // 中心线 y
++  w: number;       // 当前厚度
++}
++
+ export interface LaneRibbon {
+   id: string;
+   name: { zh: string; en: string };
+@@ -35,6 +41,8 @@
+   collapsible: boolean;
+   collapsed: boolean;
+   descendantCount: number;
++  /** 采样点（含 xScale 后坐标），供 hover wave 动画使用 */
++  samples: RibbonSample[];
+ }
+ 
+ export interface LayoutResult {
+@@ -57,12 +65,11 @@
+   enabledFamilies?: Set<FamilyId>;
+ }
+ 
+-// =================== v5 thickness ===================
+-// log scale 强对比版
+-const TH_MIN = 4;
+-const TH_MAX = 70;
+-const TH_LOG_MIN = Math.log10(100);     // 100 speakers = 4px
+-const TH_LOG_MAX = Math.log10(2e9);     // 2B speakers = 70px
++// =================== v6 thickness — 1/3 of v5 ===================
++const TH_MIN = 2;                       // v5: 4 → v6: 2
++const TH_MAX = 23;                      // v5: 70 → v6: 23 (~v5÷3)
++const TH_LOG_MIN = Math.log10(100);
++const TH_LOG_MAX = Math.log10(2e9);
+ 
+ export function defaultThickness(speakers: number): number {
+   const s = Math.max(speakers, 100);
+@@ -71,13 +78,13 @@
+   return TH_MIN + (TH_MAX - TH_MIN) * t;
+ }
+ 
+-// =================== v5 gap constants ===================
+-const CONSTANT_GAP = 8;      // ribbon 边缘之间恒定空白
+-const FAMILY_GAP = 36;       // 语系之间额外空白
+-const NOISE_FREQ_CENTER = 0.0008;    // 中心线波浪频率 (~2 个波 over 8000y)
+-const NOISE_FREQ_THICK  = 0.0015;
+-const NOISE_AMP_RATIO   = 0.35;      // amplitude 不超 gap/2 的 35%
+-const NOISE_THICK_PCT   = 0.10;      // 厚度波动 ±10%
++// =================== gap & noise ===================
++const CONSTANT_GAP = 8;
++const FAMILY_GAP = 36;
++const NOISE_FREQ_CENTER = 0.0009;
++const NOISE_FREQ_THICK  = 0.0017;
++const NOISE_AMP_PX      = 2.5;          // v5: 1.4 → v6: 2.5（绝对像素，更明显）
++const NOISE_THICK_PCT   = 0.18;         // v5: 0.10 → v6: 0.18 厚度起伏更明显
+ 
+ // 简易确定性 hash → 给每条河独立 phase
+ function hashStr(s: string): number {
+@@ -260,8 +267,8 @@
+   }
+ 
+   // -------- 生成 ribbons —— 加 noise wave + thickness 变化 --------
+-  const STEP = 35;
+-  const noiseAmp = (CONSTANT_GAP / 2) * NOISE_AMP_RATIO; // 约 1.4px — 看起来微微弯但不重叠
++  const STEP = 30;
++  const noiseAmp = NOISE_AMP_PX;
+   const ribbons: LaneRibbon[] = [];
+   let thickSum = 0;
+ 
+@@ -361,6 +368,13 @@
+     const peak = peakThick.get(l.id) ?? Math.max(...samples.map((s) => s.w));
+     thickSum += peak;
+ 
++    // 把 samples 转成已 xScale 处理过的坐标数组（供 hover wave 用）
++    const ribbonSamples: RibbonSample[] = samples.map((s) => ({
++      x: xScale(s.year),
++      y: s.y,
++      w: s.w,
++    }));
++
+     ribbons.push({
+       id: l.id,
+       name: l.name,
+@@ -379,6 +393,7 @@
+       collapsible,
+       collapsed,
+       descendantCount: countAllDesc(l.id),
++      samples: ribbonSamples,
+     });
+   }
+ 
+--- a/app/components/RiverChart.tsx
++++ b/app/components/RiverChart.tsx
+@@ -8,9 +8,76 @@
+   X_TICKS,
+   EVENTS,
+   type LaneRibbon,
++  type RibbonSample,
+ } from "@/lib/layout";
+ import { FAMILY_META, type FamilyId } from "@/lib/types";
+ 
++// ===== Wave glyph helpers =====
++// Deterministic small RNG seeded by string
++function hashStr(s: string): number {
++  let h = 2166136261;
++  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
++  return h >>> 0;
++}
++function mulberry32(seed: number) {
++  return function () {
++    seed = (seed + 0x6d2b79f5) | 0;
++    let t = seed;
++    t = Math.imul(t ^ (t >>> 15), t | 1);
++    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
++    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
++  };
++}
++function sampleAt(samples: RibbonSample[], x: number): RibbonSample {
++  if (samples.length === 0) return { x, y: 0, w: 0 };
++  if (x <= samples[0].x) return samples[0];
++  if (x >= samples[samples.length - 1].x) return samples[samples.length - 1];
++  for (let i = 0; i < samples.length - 1; i++) {
++    if (x >= samples[i].x && x <= samples[i + 1].x) {
++      const t = (x - samples[i].x) / Math.max(1e-6, samples[i + 1].x - samples[i].x);
++      return {
++        x,
++        y: samples[i].y + (samples[i + 1].y - samples[i].y) * t,
++        w: samples[i].w + (samples[i + 1].w - samples[i].w) * t,
++      };
++    }
++  }
++  return samples[samples.length - 1];
++}
++
++interface Wave { x: number; y: number; h: number; a: number; sw: number; op: number }
++
++function generateWaves(samples: RibbonSample[], seed: string): Wave[] {
++  if (samples.length < 2) return [];
++  const out: Wave[] = [];
++  const rng = mulberry32(hashStr(seed));
++  const minX = samples[0].x;
++  const maxX = samples[samples.length - 1].x;
++  let x = minX + 6 + rng() * 12;
++  while (x < maxX - 4) {
++    const s = sampleAt(samples, x);
++    if (s.w >= 1.4) {
++      // glyph height = 60-75% of local ribbon thickness, clamped to a sane range
++      const ratio = 0.55 + rng() * 0.25;
++      const h = Math.max(2.6, Math.min(s.w * ratio, 14));
++      const a = 0.9 + rng() * 1.8;             // amplitude 0.9 - 2.7
++      const sign = rng() < 0.5 ? -1 : 1;
++      const sw = 0.55 + rng() * 0.55;          // stroke width 0.55-1.1
++      const op = 0.55 + rng() * 0.30;          // opacity 0.55-0.85
++      const yJitter = (rng() - 0.5) * Math.min(s.w * 0.18, 1.5);
++      out.push({ x, y: s.y + yJitter, h, a: a * sign, sw, op });
++    }
++    x += 26 + rng() * 16;                       // spacing 26-42
++  }
++  return out;
++}
++
++function waveGlyphPath(w: Wave): string {
++  // 小垂直 S 曲线：M cx,y-h/2  C cx+a,y-h/3  cx-a,y+h/3  cx,y+h/2
++  const { x, y, h, a } = w;
++  return `M ${x.toFixed(2)},${(y - h / 2).toFixed(2)} C ${(x + a).toFixed(2)},${(y - h / 3).toFixed(2)} ${(x - a).toFixed(2)},${(y + h / 3).toFixed(2)} ${x.toFixed(2)},${(y + h / 2).toFixed(2)}`;
++}
++
+ interface Props {
+   width: number;
+   containerHeight: number;
+@@ -262,20 +329,33 @@
+                     </title>
+                   </path>
+ 
+-                  {/* v5: hover/selected 流水高光 — center line stroke with moving dashes */}
+-                  {isHighlighted && (
+-                    <path
+-                      d={r.centerPath}
+-                      fill="none"
+-                      stroke="white"
+-                      strokeOpacity={0.85}
+-                      strokeWidth={Math.max(6, r.peakThickness * 0.55)}
+-                      strokeLinecap="round"
+-                      strokeDasharray="22 80"
+-                      className="river-flow"
+-                      pointerEvents="none"
+-                    />
+-                  )}
++                  {/* v6: hover/selected 流水高光 — 手绘感垂直波浪线 + 横向流动 */}
++                  {isHighlighted && (() => {
++                    const waves = generateWaves(r.samples, r.id);
++                    if (waves.length === 0) return null;
++                    return (
++                      <g pointerEvents="none">
++                        <defs>
++                          <clipPath id={`wave-clip-${r.id}`}>
++                            <path d={r.path} />
++                          </clipPath>
++                        </defs>
++                        <g clipPath={`url(#wave-clip-${r.id})`} className="river-waves">
++                          {waves.map((wv, i) => (
++                            <path
++                              key={i}
++                              d={waveGlyphPath(wv)}
++                              fill="none"
++                              stroke="white"
++                              strokeWidth={wv.sw}
++                              strokeLinecap="round"
++                              opacity={wv.op}
++                            />
++                          ))}
++                        </g>
++                      </g>
++                    );
++                  })()}
+                 </g>
+               );
+             })}
+--- a/app/globals.css
++++ b/app/globals.css
+@@ -56,15 +56,23 @@
+   to { stroke-dashoffset: -200; }
+ }
+ 
+-/* v5: hover / selected ribbon 流水高光 */
+-.river-flow {
+-  animation: river-flow 2.4s linear infinite;
++/* v6: hover / selected ribbon — 手绘感垂直波浪线，整组缓慢向右流动 */
++.river-waves {
++  animation: river-waves 4.5s linear infinite;
+   pointer-events: none;
+   mix-blend-mode: overlay;
+ }
+-@keyframes river-flow {
+-  from { stroke-dashoffset: 0; }
+-  to { stroke-dashoffset: -204; }
++@keyframes river-waves {
++  from { transform: translateX(0); }
++  to   { transform: translateX(34px); }
++}
++/* 同时让每条波浪线微微脉动，更像真水的反光 */
++.river-waves > path {
++  animation: wave-pulse 2.3s ease-in-out infinite;
++}
++@keyframes wave-pulse {
++  0%, 100% { opacity: 0.45; }
++  50%      { opacity: 0.90; }
+ }
+ 
+ /* 隐藏滚动条但保持滚动 */

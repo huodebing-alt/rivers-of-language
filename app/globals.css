@@ -56,15 +56,23 @@ h1, h2, h3, h4, .serif {
   to { stroke-dashoffset: -200; }
 }
 
-/* v5: hover / selected ribbon 流水高光 */
-.river-flow {
-  animation: river-flow 2.4s linear infinite;
+/* v6: hover / selected ribbon — 手绘感垂直波浪线，整组缓慢向右流动 */
+.river-waves {
+  animation: river-waves 4.5s linear infinite;
   pointer-events: none;
   mix-blend-mode: overlay;
 }
-@keyframes river-flow {
-  from { stroke-dashoffset: 0; }
-  to { stroke-dashoffset: -204; }
+@keyframes river-waves {
+  from { transform: translateX(0); }
+  to   { transform: translateX(34px); }
+}
+/* 同时让每条波浪线微微脉动，更像真水的反光 */
+.river-waves > path {
+  animation: wave-pulse 2.3s ease-in-out infinite;
+}
+@keyframes wave-pulse {
+  0%, 100% { opacity: 0.45; }
+  50%      { opacity: 0.90; }
 }
 
 /* 隐藏滚动条但保持滚动 */
