@@ -142,14 +142,15 @@ export default function RiverChart(props: Props) {
 
   if (typeof window !== "undefined") {
     (window as any).__riverLayout = {
-      version: "v5",
+      version: "v7",
       width,
       totalHeight,
       ribbonCount: ribbons.length,
       visibleLeafCount,
       collapsedCount,
+      mergedRibbonCount: ribbons.filter((r) => r.isMergedRibbon).length,
       meanRibbonThickness: Math.round(meanRibbonThickness * 10) / 10,
-      mapProjection: "equirectangular (d3-geo)",
+      mapProjection: "natural earth (d3-geo)",
       MARGIN,
     };
   }
@@ -267,6 +268,13 @@ export default function RiverChart(props: Props) {
                 <stop offset="1" stopColor={meta.color} stopOpacity="0.9" />
               </linearGradient>
             ))}
+            {/* v7: 合并 ribbon ambient 渐变 — 比常态更柔和、低对比 */}
+            {Object.entries(FAMILY_META).map(([key, meta]) => (
+              <linearGradient key={`m-${key}`} id={`grad-${key}-merged`} x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0" stopColor={meta.color} stopOpacity="0.18" />
+                <stop offset="1" stopColor={meta.color} stopOpacity="0.40" />
+              </linearGradient>
+            ))}
             {/* v5: 流水高光 — 单条 ribbon hover 时叠加 */}
             <linearGradient id="flow-shine" x1="0" y1="0" x2="1" y2="0">
               <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0" />
@@ -308,24 +316,32 @@ export default function RiverChart(props: Props) {
               const isReconstructed = r.status === "reconstructed";
               const isExtinct = r.status === "extinct" || r.status === "historical";
               const isHighlighted = hoveredId === r.id || selectedId === r.id;
+              // v7: 合并 ribbon 用 ambient 渐变 + 低 opacity
+              const cursor = r.collapsible ? "pointer" : "default";
+              const isMerged = r.isMergedRibbon;
+              const fillGrad = isMerged ? `url(#grad-${r.family}-merged)` : `url(#grad-${r.family})`;
+              const baseOp = isMerged ? 0.55 : isReconstructed ? 0.45 : isExtinct ? 0.72 : 0.92;
               return (
                 <g key={r.id}>
                   <path
                     d={r.path}
-                    className={`river cursor-pointer ${isFocus ? "" : "river-dim"}`}
-                    fill={`url(#grad-${r.family})`}
-                    opacity={isReconstructed ? 0.45 : isExtinct ? 0.72 : 0.92}
+                    className={`river ${isFocus ? "" : "river-dim"} ${isMerged ? "river-merged" : ""}`}
+                    style={{ cursor }}
+                    fill={fillGrad}
+                    opacity={baseOp}
                     stroke={familyColor(r.family)}
-                    strokeWidth={isHighlighted ? 1.6 : 0.4}
-                    strokeOpacity={0.55}
-                    strokeDasharray={isReconstructed ? "3 3" : undefined}
+                    strokeWidth={isHighlighted ? 1.6 : isMerged ? 0.7 : 0.4}
+                    strokeOpacity={isMerged ? 0.65 : 0.55}
+                    strokeDasharray={isReconstructed && !isMerged ? "3 3" : isMerged ? "6 4" : undefined}
                     onMouseEnter={() => setHoveredId(r.id)}
                     onMouseLeave={() => setHoveredId(null)}
                     onClick={(e) => onRibbonClick(r, e)}
                   >
                     <title>
-                      {r.name.zh} · {r.name.en}
-                      {r.collapsible ? (r.collapsed ? "  [click to expand]" : "  [click to collapse]") : ""}
+                      {r.displayName.zh} · {r.displayName.en}
+                      {r.collapsible
+                        ? (r.collapsed ? `  [+${r.descendantCount} merged — click to expand]` : "  [click to collapse]")
+                        : ""}
                     </title>
                   </path>
 
@@ -391,7 +407,8 @@ export default function RiverChart(props: Props) {
           {/* 语言标签 */}
           <g className="labels">
             {ribbons.map((r) => {
-              if (r.status === "reconstructed") {
+              // 拟构语：左端标 *
+              if (r.status === "reconstructed" && !r.isMergedRibbon) {
                 return (
                   <text
                     key={r.id}
@@ -405,11 +422,11 @@ export default function RiverChart(props: Props) {
                     dominantBaseline="middle"
                     pointerEvents="none"
                   >
-                    * {r.name.zh}
-                    {r.collapsed && <tspan fill="#A8853C" fontSize={9} dx={4}>+{r.descendantCount}</tspan>}
+                    * {r.displayName.zh}
                   </text>
                 );
               }
+              // 灭绝语言（且未折叠）：inline 在 died 处标 †
               if (r.died < 2020 && !r.collapsed) {
                 return (
                   <text
@@ -424,12 +441,14 @@ export default function RiverChart(props: Props) {
                     dominantBaseline="middle"
                     pointerEvents="none"
                   >
-                    † {r.name.zh}
+                    † {r.displayName.zh}
                   </text>
                 );
               }
-              const lines = isMobile ? splitLongName(r.name.zh, 6) : [r.name.zh];
+              // living / merged 合并 ribbon：右侧 label
+              const lines = isMobile ? splitLongName(r.displayName.zh, 6) : [r.displayName.zh];
               const isHighlighted = hoveredId === r.id || selectedId === r.id;
+              const isMerged = r.isMergedRibbon;
               return (
                 <g key={r.id}>
                   {lines.map((line, i) => (
@@ -439,14 +458,15 @@ export default function RiverChart(props: Props) {
                       y={r.yStart + (i - (lines.length - 1) / 2) * 13}
                       fontSize={isHighlighted ? 14 : 12}
                       fontFamily="'Noto Serif SC', 'Cormorant Garamond', serif"
-                      fill={isHighlighted ? familyColor(r.family) : "#3A332A"}
-                      fontWeight={isHighlighted ? 600 : 400}
-                      opacity={focusIds && !focusIds.has(r.id) ? 0.18 : 0.95}
+                      fontStyle={isMerged ? "italic" : "normal"}
+                      fill={isHighlighted ? familyColor(r.family) : isMerged ? familyColor(r.family) : "#3A332A"}
+                      fontWeight={isHighlighted ? 600 : isMerged ? 500 : 400}
+                      opacity={focusIds && !focusIds.has(r.id) ? 0.18 : isMerged ? 0.85 : 0.95}
                       dominantBaseline="middle"
                       pointerEvents="none"
                     >
                       {line}
-                      {r.collapsed && <tspan fill="#A8853C" fontSize={9} dx={4}>+{r.descendantCount}</tspan>}
+                      {isMerged && <tspan fill="#A8853C" fontSize={9} dx={4}>(+{r.descendantCount})</tspan>}
                     </text>
                   ))}
                   {isHighlighted && (
@@ -461,7 +481,7 @@ export default function RiverChart(props: Props) {
                       dominantBaseline="middle"
                       pointerEvents="none"
                     >
-                      {r.name.en}
+                      {r.displayName.en}
                     </text>
                   )}
                 </g>
@@ -552,7 +572,7 @@ export default function RiverChart(props: Props) {
             fill="#A8853C"
             opacity={0.7}
           >
-            点击任意河流 = 折叠/展开后代 · Click any river to collapse/expand · 鼠标悬停看详情
+            点击有支流的河 = 折叠成「最大支流等」合流 · Click branching river to collapse into merged stream · 悬停看详情
           </text>
         </svg>
       </div>

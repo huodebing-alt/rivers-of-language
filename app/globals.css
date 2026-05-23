@@ -42,10 +42,15 @@ h1, h2, h3, h4, .serif {
 
 /* SVG 河流默认样式 */
 .river {
-  transition: opacity 0.2s ease, filter 0.2s ease;
+  transition: opacity 0.25s ease, filter 0.25s ease;
 }
 .river-dim { opacity: 0.18; }
 .river-highlight { filter: drop-shadow(0 0 6px rgba(196, 160, 90, 0.6)); }
+
+/* v7: 折叠合并 ribbon — ambient 视觉 */
+.river-merged {
+  filter: blur(0.15px);
+}
 
 /* 借用虚线动画 */
 .contact-loan {

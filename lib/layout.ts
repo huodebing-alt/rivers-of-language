@@ -26,6 +26,8 @@ export interface RibbonSample {
 export interface LaneRibbon {
   id: string;
   name: { zh: string; en: string };
+  /** 实际渲染用的名字（collapsed 时是「最大支流+等」） */
+  displayName: { zh: string; en: string };
   family: FamilyId;
   branch?: string;
   path: string;
@@ -40,6 +42,8 @@ export interface LaneRibbon {
   peakThickness: number;
   collapsible: boolean;
   collapsed: boolean;
+  /** 是否为「折叠后合并显示」的 ribbon */
+  isMergedRibbon: boolean;
   descendantCount: number;
   /** 采样点（含 xScale 后坐标），供 hover wave 动画使用 */
   samples: RibbonSample[];
@@ -211,18 +215,88 @@ export function computeLayout(opts: LayoutOptions): LayoutResult {
     l.geo.lon / 360;
   visibleLeaves.sort((a, b) => sortKey(a) - sortKey(b));
 
-  // -------- v5: 计算 peakThickness 给每个 visibleLeaf --------
+  // -------- v7: 计算合并 ribbon profile（仅 collapsed 节点）--------
+  // 收集所有子孙（不管 enabled 与否 — collapse 把整个子树视为一支合流）
+  function allDescendantsOf(id: string): LanguageNode[] {
+    const out: LanguageNode[] = [];
+    const stack = [...(childrenOf.get(id) ?? [])];
+    while (stack.length) {
+      const cid = stack.pop()!;
+      const node = LANGUAGE_BY_ID.get(cid);
+      if (node) out.push(node);
+      const kids = childrenOf.get(cid) ?? [];
+      stack.push(...kids);
+    }
+    return out;
+  }
+
+  function pickBiggest(descs: LanguageNode[]): LanguageNode {
+    // 优先 living，按 2025 人数；否则全部里峰值人数
+    const living = descs.filter((d) => d.status === "living");
+    const pool = living.length > 0 ? living : descs;
+    let best = pool[0];
+    let bestScore = -1;
+    for (const d of pool) {
+      const score = living.length > 0
+        ? speakerAt(d, 2025)
+        : Math.max(0, ...(d.speakers ?? []).map((s) => s.count));
+      if (score > bestScore) { best = d; bestScore = score; }
+    }
+    return best;
+  }
+
+  // mergedProfile.get(id) → 仅对 collapsed visible-leaf 有意义
+  interface MergedProfile {
+    biggest: LanguageNode;
+    descendants: LanguageNode[];
+    effectiveDied: number;
+    displayName: { zh: string; en: string };
+  }
+  const mergedProfile = new Map<string, MergedProfile>();
+  for (const leaf of visibleLeaves) {
+    if (!collapsedIds.has(leaf.id)) continue;
+    const descs = allDescendantsOf(leaf.id);
+    if (descs.length === 0) continue;
+    const biggest = pickBiggest(descs);
+    const maxDied = Math.max(leaf.died ?? 2026, ...descs.map((d) => d.died ?? 2026));
+    mergedProfile.set(leaf.id, {
+      biggest,
+      descendants: descs,
+      effectiveDied: maxDied,
+      displayName: {
+        zh: biggest.name.zh + "等",
+        en: biggest.name.en + " et al.",
+      },
+    });
+  }
+
+  // -------- v7: effectiveSpeakers — 合并 ribbon 在任一年取「最大 descendant 的当年人数」×1.15 --------
+  function effectiveSpeakers(l: LanguageNode, y: number): number {
+    const mp = mergedProfile.get(l.id);
+    if (!mp) return speakerAt(l, y);
+    let max = speakerAt(l, y);
+    for (const d of mp.descendants) {
+      const s = speakerAt(d, y);
+      if (s > max) max = s;
+    }
+    return max * 1.15;       // ← 比最大支流粗一点
+  }
+
+  function effectiveDied(l: LanguageNode): number {
+    const mp = mergedProfile.get(l.id);
+    return mp ? mp.effectiveDied : (l.died ?? 2026);
+  }
+
+  // -------- 计算 peakThickness 给每个 visibleLeaf --------
   const peakThick = new Map<string, number>();
   for (const leaf of visibleLeaves) {
     let m = 0;
-    const died = leaf.died ?? 2026;
-    // sample every 100y
+    const died = effectiveDied(leaf);
     for (let y = leaf.born; y <= died; y += 100) {
-      const t = thickness(speakerAt(leaf, y));
+      const t = thickness(effectiveSpeakers(leaf, y));
       if (t > m) m = t;
     }
-    // 包含 2025 / final
-    const final = thickness(speakerAt(leaf, died));
+    const final = thickness(effectiveSpeakers(leaf, died));
     if (final > m) m = final;
     peakThick.set(leaf.id, Math.max(TH_MIN, m));
   }
@@ -275,12 +349,13 @@ export function computeLayout(opts: LayoutOptions): LayoutResult {
   for (const l of LANGUAGES) {
     if (!shown.has(l.id)) continue;
     const born = l.born;
-    const died = l.died ?? 2026;
+    const isMerged = mergedProfile.has(l.id);
+    const died = effectiveDied(l);            // v7: 合并 ribbon 延伸到最远 descendant
     const startY = yOf.get(l.id)!;
     const parentY = l.parent && yOf.has(l.parent) ? yOf.get(l.parent)! : startY;
 
-    const isLiving = l.status === "living";
-    const isRecon = l.status === "reconstructed";
+    const isLiving = isMerged ? true : l.status === "living";
+    const isRecon = l.status === "reconstructed" && !isMerged;
     const minW = isRecon ? 1.2 : isLiving ? 3 : 2;
     const phaseY = phase(l.id, "y");
     const phaseT = phase(l.id, "t");
@@ -306,22 +381,23 @@ export function computeLayout(opts: LayoutOptions): LayoutResult {
       cy += Math.sin(y * NOISE_FREQ_CENTER + phaseY) * noiseAmp * ampFactor;
 
       // base thickness
-      const count = speakerAt(l, y);
+      // v7: 用 effectiveSpeakers — 合并 ribbon 取 max(descendants) × 1.15
+      const count = effectiveSpeakers(l, y);
       let w = Math.max(minW, thickness(count));
 
-      // v5: noise thickness 微胖瘦
+      // noise thickness 微胖瘦
       w *= 1 + Math.sin(y * NOISE_FREQ_THICK + phaseT) * NOISE_THICK_PCT * ampFactor;
 
-      // taper birth/death
+      // taper birth/death（合并 ribbon 不在尾端 taper — 它是活的）
       if (y < born + TRANSITION) w *= Math.max(0.05, (y - born) / TRANSITION);
-      if (l.died && y > died - TRANSITION) w *= Math.max(0.05, (died - y) / TRANSITION);
+      if (!isMerged && l.died && y > died - TRANSITION) w *= Math.max(0.05, (died - y) / TRANSITION);
 
       samples.push({ year: y, y: cy, w });
     }
     if (samples.length === 0 || samples[samples.length - 1].year < died) {
       let cy = startY;
-      let w = Math.max(minW, thickness(speakerAt(l, died)));
-      if (l.died) w *= 0.05;
+      let w = Math.max(minW, thickness(effectiveSpeakers(l, died)));
+      if (!isMerged && l.died) w *= 0.05;
       samples.push({ year: died, y: cy, w });
     }
 
@@ -375,9 +451,13 @@ export function computeLayout(opts: LayoutOptions): LayoutResult {
       w: s.w,
     }));
 
+    const mp = mergedProfile.get(l.id);
+    const displayName = mp ? mp.displayName : l.name;
+
     ribbons.push({
       id: l.id,
       name: l.name,
+      displayName,
       family: l.family,
       branch: l.branch,
       path,
@@ -392,6 +472,7 @@ export function computeLayout(opts: LayoutOptions): LayoutResult {
       peakThickness: peak,
       collapsible,
       collapsed,
+      isMergedRibbon: !!mp,
       descendantCount: countAllDesc(l.id),
       samples: ribbonSamples,
     });
