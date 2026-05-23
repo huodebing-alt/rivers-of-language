@@ -8,6 +8,8 @@ interface Props {
   setShowContacts: (b: boolean) => void;
   enabledFamilies: Set<FamilyId>;
   toggleFamily: (f: FamilyId) => void;
+  collapsedCount?: number;
+  resetCollapsed?: () => void;
 }
 
 export default function Controls({
@@ -17,6 +19,8 @@ export default function Controls({
   setShowContacts,
   enabledFamilies,
   toggleFamily,
+  collapsedCount = 0,
+  resetCollapsed,
 }: Props) {
   return (
     <div className="flex items-center gap-4 px-5 py-3 border-b border-cream-200 bg-cream-50/80 backdrop-blur-sm">
@@ -74,6 +78,17 @@ export default function Controls({
               );
             })}
           </div>
+
+          {/* 折叠状态指示 + reset */}
+          {collapsedCount > 0 && resetCollapsed && (
+            <button
+              onClick={resetCollapsed}
+              className="text-[10px] px-2 py-0.5 rounded-full border border-carmine-500 text-carmine-500 hover:bg-carmine-500 hover:text-cream-50 transition-colors"
+              title="展开所有折叠的分支 / Expand all collapsed branches"
+            >
+              展开全部 ({collapsedCount})
+            </button>
+          )}
 
           <label className="flex items-center gap-1.5 text-xs text-ink-500 ml-auto cursor-pointer">
             <input

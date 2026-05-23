@@ -1,63 +1,86 @@
 "use client";
-import { useMemo } from "react";
-import * as d3 from "d3";
-import { LANGUAGE_BY_ID } from "@/lib/data";
+import { useEffect, useMemo, useState } from "react";
+import { geoNaturalEarth1, geoPath } from "d3";
+import { feature } from "topojson-client";
+import { LANGUAGE_BY_ID, LANGUAGES } from "@/lib/data";
 import { FAMILY_META } from "@/lib/types";
 
-// 极简的世界地图 — 用一组国家/大陆的轮廓近似
-// 为了零外部 GeoJSON 依赖，使用世界主要大陆的圆弧近似
-const W = 280, H = 180;
+const WIDTH = 300, HEIGHT = 170;
 
 interface Props {
   highlightId: string | null;
 }
 
-// 用 Mollweide 投影把 (lat, lon) 投到画布上
-function project(lat: number, lon: number): [number, number] {
-  // Equirectangular projection
-  const x = ((lon + 180) / 360) * W;
-  const y = ((90 - lat) / 180) * H;
-  return [x, y];
-}
+// world-atlas v2 (~110KB gzipped) — fetched from CDN once, cached
+const WORLD_URL = "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json";
 
-// 简化大陆轮廓（粗略椭圆 / 多边形）
-const CONTINENTS: { name: string; d: string }[] = [
-  // 欧亚大陆
-  { name: "Eurasia", d: "M 60,30 Q 120,20 200,32 Q 240,45 250,80 Q 230,95 180,92 Q 130,90 90,80 Q 60,70 60,50 Z" },
-  // 非洲
-  { name: "Africa", d: "M 130,75 Q 160,80 165,110 Q 160,140 145,150 Q 130,140 125,110 Q 120,90 130,75 Z" },
-  // 澳大利亚
-  { name: "Australia", d: "M 215,125 Q 245,125 245,140 Q 235,150 215,148 Q 205,140 215,125 Z" },
-  // 北美
-  { name: "N. America", d: "M 25,40 Q 60,35 70,60 Q 65,80 45,85 Q 25,75 20,60 Q 18,48 25,40 Z" },
-  // 南美
-  { name: "S. America", d: "M 55,95 Q 75,95 75,120 Q 70,148 55,150 Q 45,135 48,115 Q 50,100 55,95 Z" },
-];
+let _worldCache: any | null = null;
 
 export default function MiniMap({ highlightId }: Props) {
-  const all = LANGUAGE_BY_ID;
-  const highlight = highlightId ? all.get(highlightId) : null;
+  const [world, setWorld] = useState<any | null>(_worldCache);
+
+  useEffect(() => {
+    if (_worldCache) {
+      setWorld(_worldCache);
+      return;
+    }
+    let cancelled = false;
+    fetch(WORLD_URL)
+      .then((r) => r.json())
+      .then((topo) => {
+        if (cancelled) return;
+        const fc = feature(topo, topo.objects.countries) as any;
+        _worldCache = fc;
+        setWorld(fc);
+      })
+      .catch(() => {
+        // 网络失败：什么都不画（保留 fallback 视觉）
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const projection = useMemo(
+    () => geoNaturalEarth1().scale(58).translate([WIDTH / 2, HEIGHT / 2 + 6]),
+    []
+  );
+  const pathGen = useMemo(() => geoPath(projection), [projection]);
+
+  const highlight = highlightId ? LANGUAGE_BY_ID.get(highlightId) : null;
+  const allLangs = useMemo(
+    () => Array.from(LANGUAGE_BY_ID.values()),
+    []
+  );
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} width={W} height={H} className="block">
-      {/* 大陆轮廓 */}
-      <g opacity={0.4}>
-        {CONTINENTS.map((c) => (
-          <path key={c.name} d={c.d} fill="#E2D3B0" stroke="#A8853C" strokeWidth={0.4} />
+    <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} width={WIDTH} height={HEIGHT} className="block">
+      {/* 海洋背景 */}
+      <rect x={0} y={0} width={WIDTH} height={HEIGHT} fill="#F5EFE2" opacity={0.5} />
+
+      {/* 大陆轮廓（来自 world-atlas v2） */}
+      <g opacity={0.45}>
+        {world?.features.map((country: any, i: number) => (
+          <path
+            key={i}
+            d={pathGen(country) || undefined}
+            fill="#E2D3B0"
+            stroke="#A8853C"
+            strokeWidth={0.3}
+          />
         ))}
       </g>
 
-      {/* 所有语言的点（淡色） */}
-      <g opacity={0.4}>
-        {Array.from(all.values()).map((l) => {
+      {/* 全部语言点（淡） */}
+      <g opacity={0.55}>
+        {allLangs.map((l) => {
           if (l.status === "reconstructed") return null;
-          const [x, y] = project(l.geo.lat, l.geo.lon);
+          const p = projection([l.geo.lon, l.geo.lat]);
+          if (!p) return null;
           return (
             <circle
               key={l.id}
-              cx={x}
-              cy={y}
-              r={0.7}
+              cx={p[0]}
+              cy={p[1]}
+              r={0.9}
               fill={FAMILY_META[l.family].color}
             />
           );
@@ -66,17 +89,41 @@ export default function MiniMap({ highlightId }: Props) {
 
       {/* 高亮 */}
       {highlight && (() => {
-        const [x, y] = project(highlight.geo.lat, highlight.geo.lon);
+        const p = projection([highlight.geo.lon, highlight.geo.lat]);
+        if (!p) return null;
         return (
           <g>
-            <circle cx={x} cy={y} r={8} fill={FAMILY_META[highlight.family].color} opacity={0.25} />
-            <circle cx={x} cy={y} r={3.2} fill={FAMILY_META[highlight.family].color} stroke="#FBF8F1" strokeWidth={0.6} />
+            <circle cx={p[0]} cy={p[1]} r={11} fill={FAMILY_META[highlight.family].color} opacity={0.22} />
+            <circle cx={p[0]} cy={p[1]} r={5.5} fill={FAMILY_META[highlight.family].color} opacity={0.5} />
+            <circle cx={p[0]} cy={p[1]} r={3} fill={FAMILY_META[highlight.family].color} stroke="#FBF8F1" strokeWidth={0.8} />
+            {/* 名字标签 */}
+            <text
+              x={p[0] + 8}
+              y={p[1] - 2}
+              fontSize={9}
+              fontFamily="'Noto Serif SC', 'Cormorant Garamond', serif"
+              fill={FAMILY_META[highlight.family].color}
+              fontWeight={600}
+            >
+              {highlight.name.zh}
+            </text>
+            <text
+              x={p[0] + 8}
+              y={p[1] + 9}
+              fontSize={8}
+              fontStyle="italic"
+              fontFamily="'Cormorant Garamond', serif"
+              fill={FAMILY_META[highlight.family].color}
+              opacity={0.75}
+            >
+              {highlight.name.en}
+            </text>
           </g>
         );
       })()}
 
       {/* 边框 */}
-      <rect x={0.5} y={0.5} width={W - 1} height={H - 1} fill="none" stroke="#A8853C" strokeWidth={0.4} opacity={0.4} />
+      <rect x={0.5} y={0.5} width={WIDTH - 1} height={HEIGHT - 1} fill="none" stroke="#A8853C" strokeWidth={0.4} opacity={0.4} />
     </svg>
   );
 }

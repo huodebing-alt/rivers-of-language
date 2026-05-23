@@ -56,6 +56,17 @@ h1, h2, h3, h4, .serif {
   to { stroke-dashoffset: -200; }
 }
 
+/* v5: hover / selected ribbon 流水高光 */
+.river-flow {
+  animation: river-flow 2.4s linear infinite;
+  pointer-events: none;
+  mix-blend-mode: overlay;
+}
+@keyframes river-flow {
+  from { stroke-dashoffset: 0; }
+  to { stroke-dashoffset: -204; }
+}
+
 /* 隐藏滚动条但保持滚动 */
 .scrollbar-thin::-webkit-scrollbar { width: 4px; }
 .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(58, 51, 42, 0.2); }

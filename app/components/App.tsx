@@ -1,14 +1,16 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import RiverChart from "./RiverChart";
 import ScriptTree from "./ScriptTree";
 import DetailPanel from "./DetailPanel";
 import Controls from "./Controls";
 import { FAMILY_META, type FamilyId } from "@/lib/types";
 
+const TOOLBAR_H = 60;
+
 export default function App() {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [size, setSize] = useState({ width: 1200, minHeight: 700 });
+  const [size, setSize] = useState({ width: 1200, containerHeight: 700 });
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mode, setMode] = useState<"language" | "script">("language");
@@ -16,6 +18,7 @@ export default function App() {
   const [enabledFamilies, setEnabledFamilies] = useState<Set<FamilyId>>(
     new Set(Object.keys(FAMILY_META) as FamilyId[])
   );
+  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
   const [isMobile, setIsMobile] = useState(false);
 
   useEffect(() => {
@@ -26,7 +29,7 @@ export default function App() {
       const detailW = w >= 1024 ? 340 : 0;
       setSize({
         width: Math.max(720, w - detailW - 2),
-        minHeight: Math.max(500, h - 60 - 2),
+        containerHeight: Math.max(420, h - TOOLBAR_H - 2),
       });
     }
     onResize();
@@ -42,11 +45,21 @@ export default function App() {
     });
   }
 
+  const toggleCollapse = useCallback((id: string) => {
+    setCollapsedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const resetCollapsed = useCallback(() => setCollapsedIds(new Set()), []);
+
   const focusId = hoveredId ?? selectedId;
 
-  // Mobile: 总宽度更宽（横向滚动），最小高度由 layout 算法决定
+  // Mobile: chart 更宽（横向滚动），桌面用 viewport 宽
   const chartWidth = isMobile ? 1700 : size.width;
-  const chartMinHeight = isMobile ? 1200 : size.minHeight;
+  const chartContainerHeight = size.containerHeight;
 
   return (
     <div ref={containerRef} className="h-screen w-screen overflow-hidden flex flex-col bg-cream-50">
@@ -57,18 +70,17 @@ export default function App() {
         setShowContacts={setShowContacts}
         enabledFamilies={enabledFamilies}
         toggleFamily={toggleFamily}
+        collapsedCount={collapsedIds.size}
+        resetCollapsed={resetCollapsed}
       />
 
       <div className="flex-1 flex min-h-0 overflow-hidden">
-        {/* 主图区：双向滚动（X 时间 + Y 语系堆叠） — overflow-auto 关键 */}
-        <div
-          className="flex-1 overflow-auto min-h-0"
-          style={{ maxHeight: "calc(100vh - 60px)" }}
-        >
+        {/* 主图区 — 横向滚动外层（mobile 用），垂直滚动在 RiverChart 内部 */}
+        <div className="flex-1 overflow-x-auto overflow-y-hidden min-w-0">
           {mode === "language" ? (
             <RiverChart
               width={chartWidth}
-              minHeight={chartMinHeight}
+              containerHeight={chartContainerHeight}
               isMobile={isMobile}
               hoveredId={hoveredId}
               selectedId={selectedId}
@@ -76,16 +88,19 @@ export default function App() {
               setSelectedId={setSelectedId}
               showContacts={showContacts}
               enabledFamilies={enabledFamilies}
+              collapsedIds={collapsedIds}
+              toggleCollapse={toggleCollapse}
             />
           ) : (
-            <ScriptTree
-              width={chartWidth}
-              height={isMobile ? 1400 : size.minHeight}
-            />
+            <div className="overflow-auto" style={{ maxHeight: chartContainerHeight }}>
+              <ScriptTree
+                width={chartWidth}
+                height={isMobile ? 1400 : chartContainerHeight}
+              />
+            </div>
           )}
         </div>
 
-        {/* Desktop 右侧详情 */}
         {!isMobile && (
           <aside className="hidden lg:block w-[340px] border-l border-cream-200 bg-cream-50 overflow-hidden shrink-0">
             <DetailPanel id={focusId} />
@@ -93,10 +108,7 @@ export default function App() {
         )}
       </div>
 
-      {/* Mobile 底部 sheet */}
-      {isMobile && (
-        <MobileSheet focusId={focusId} />
-      )}
+      {isMobile && <MobileSheet focusId={focusId} />}
     </div>
   );
 }

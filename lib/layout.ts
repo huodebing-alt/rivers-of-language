@@ -1,13 +1,17 @@
 /**
- * 河流布局算法 v2 — 修复下游 overlap + 长标签
+ * 河流布局算法 v5
  *
- * 关键改动 vs v1：
- *  - 每个 leaf 按 **峰值厚度** 预留垂直「车道」（min 7px / living, 5px / historical, + gap）
- *  - SVG **总高度动态计算** — 不再固定容器高度，让所有 ribbon 都有空间，容器 overflow-y scroll
- *  - ribbon 厚度有下限（living = 4px, historical = 2px），保证 hover 可点
- *  - 后期 collision 检测：扫一遍所有 ribbon，发现 yStart 间距 < laneHeight 的对手就下推
+ * v5 关键改动：
+ *  1. 厚度：log scale，强对比 — minTh=4, maxTh=70 px；英语视觉压倒性粗
+ *  2. 堆叠：按 peak thickness + 恒定 gap（语言间 8px / 语系间 36px），ribbon 边缘等距
+ *  3. centerline 加低频 sinusoidal noise — 每条河独立 phase 看像真河流
+ *  4. thickness 加微 noise — 让河流有自然胖瘦变化
+ *  5. ribbon 边缘 noise 不会越过相邻 ribbon（amplitude < gap/2）
  *
- * 调用方拿到 `{ ribbons, totalHeight }`，把 totalHeight 设给 SVG 的 height 属性。
+ * 保留 v4：
+ *  - collapsedIds + enabledFamilies 过滤
+ *  - 动态 totalHeight
+ *  - X 轴分段线性
  */
 
 import { LANGUAGES, LANGUAGE_BY_ID, speakerAt } from "./data";
@@ -18,21 +22,27 @@ export interface LaneRibbon {
   name: { zh: string; en: string };
   family: FamilyId;
   branch?: string;
-  path: string;          // SVG path d
-  centerPath: string;    // 中线 path（用于 label / hover）
+  path: string;
+  centerPath: string;
   status: string;
   born: number;
   died: number;
-  yStart: number;        // 出生 y
-  yEnd: number;          // 死亡 / 现在 y
+  yStart: number;
+  yEnd: number;
   parent?: string;
-  /** 当前在 modern 的厚度（用于 hit 区域判断） */
   modernThickness: number;
+  peakThickness: number;
+  collapsible: boolean;
+  collapsed: boolean;
+  descendantCount: number;
 }
 
 export interface LayoutResult {
   ribbons: LaneRibbon[];
   totalHeight: number;
+  visibleLeafCount: number;
+  collapsedCount: number;
+  meanRibbonThickness: number;
 }
 
 export interface LayoutOptions {
@@ -42,16 +52,44 @@ export interface LayoutOptions {
   marginTop: number;
   marginBottom: number;
   xScale: (year: number) => number;
-  thickness: (speakers: number) => number;
-  /** 最小厚度（living），默认 7 */
-  minThickLiving?: number;
-  /** 最小厚度（historical / extinct），默认 5 */
-  minThickHistorical?: number;
-  /** Lane 间隔 gap，默认 3 */
-  laneGap?: number;
+  thickness?: (speakers: number) => number;
+  collapsedIds?: Set<string>;
+  enabledFamilies?: Set<FamilyId>;
 }
 
-// X 轴：分段线性
+// =================== v5 thickness ===================
+// log scale 强对比版
+const TH_MIN = 4;
+const TH_MAX = 70;
+const TH_LOG_MIN = Math.log10(100);     // 100 speakers = 4px
+const TH_LOG_MAX = Math.log10(2e9);     // 2B speakers = 70px
+
+export function defaultThickness(speakers: number): number {
+  const s = Math.max(speakers, 100);
+  const v = Math.log10(s);
+  const t = Math.max(0, Math.min(1, (v - TH_LOG_MIN) / (TH_LOG_MAX - TH_LOG_MIN)));
+  return TH_MIN + (TH_MAX - TH_MIN) * t;
+}
+
+// =================== v5 gap constants ===================
+const CONSTANT_GAP = 8;      // ribbon 边缘之间恒定空白
+const FAMILY_GAP = 36;       // 语系之间额外空白
+const NOISE_FREQ_CENTER = 0.0008;    // 中心线波浪频率 (~2 个波 over 8000y)
+const NOISE_FREQ_THICK  = 0.0015;
+const NOISE_AMP_RATIO   = 0.35;      // amplitude 不超 gap/2 的 35%
+const NOISE_THICK_PCT   = 0.10;      // 厚度波动 ±10%
+
+// 简易确定性 hash → 给每条河独立 phase
+function hashStr(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+function phase(id: string, salt: string = ""): number {
+  return ((hashStr(id + salt) % 10000) / 10000) * Math.PI * 2;
+}
+
+// =================== X 轴 ===================
 const SEGMENTS: [number, number, number][] = [
   [-6500, -2500, 0.18],
   [-2500, -200,  0.22],
@@ -64,26 +102,37 @@ const SEGMENTS: [number, number, number][] = [
 export function makeXScale(width: number, marginLeft: number, marginRight: number) {
   const usable = width - marginLeft - marginRight;
   let acc = marginLeft;
-  const breakpoints: { y0: number; y1: number; x0: number; x1: number }[] = [];
+  const bps: { y0: number; y1: number; x0: number; x1: number }[] = [];
   for (const [y0, y1, frac] of SEGMENTS) {
     const w = usable * frac;
-    breakpoints.push({ y0, y1, x0: acc, x1: acc + w });
+    bps.push({ y0, y1, x0: acc, x1: acc + w });
     acc += w;
   }
   return (year: number) => {
-    if (year <= breakpoints[0].y0) return breakpoints[0].x0;
-    if (year >= breakpoints[breakpoints.length - 1].y1) return breakpoints[breakpoints.length - 1].x1;
-    for (const bp of breakpoints) {
+    if (year <= bps[0].y0) return bps[0].x0;
+    if (year >= bps[bps.length - 1].y1) return bps[bps.length - 1].x1;
+    for (const bp of bps) {
       if (year >= bp.y0 && year <= bp.y1) {
         const t = (year - bp.y0) / (bp.y1 - bp.y0);
         return bp.x0 + t * (bp.x1 - bp.x0);
       }
     }
-    return breakpoints[breakpoints.length - 1].x1;
+    return bps[bps.length - 1].x1;
   };
 }
 
 export const X_TICKS: number[] = [-6000, -4000, -3000, -2000, -1000, -500, 0, 500, 1000, 1500, 1800, 2000];
+
+export const EVENTS: { year: number; zh: string; en: string }[] = [
+  { year: -3200, zh: "楔形文字", en: "Cuneiform" },
+  { year: -1250, zh: "甲骨文", en: "Oracle Bones" },
+  { year: -800, zh: "字母诞生", en: "Alphabet" },
+  { year: -221, zh: "秦统一文字", en: "Qin Script" },
+  { year: 632, zh: "阿语扩张", en: "Arabic Expansion" },
+  { year: 1066, zh: "诺曼征服", en: "Norman Conquest" },
+  { year: 1492, zh: "美洲开拓", en: "Atlantic Era" },
+  { year: 1928, zh: "土耳其拉丁化", en: "Turkish Latinization" },
+];
 
 const FAMILY_ORDER: FamilyId[] = ["ie", "afro", "dr", "turk", "st", "isolate", "an", "ng"];
 const BRANCH_ORDER: Record<string, number> = {
@@ -102,17 +151,15 @@ const BRANCH_ORDER: Record<string, number> = {
 
 export function computeLayout(opts: LayoutOptions): LayoutResult {
   const {
-    width,
     marginTop,
     marginBottom,
     xScale,
-    thickness,
-    minThickLiving = 22,        // v3: 7 → 22（每条 living 至少 22px 车道）
-    minThickHistorical = 16,    // v3: 5 → 16
-    laneGap = 18,               // v3: 3 → 18（车道间空白大幅加大）
+    thickness = defaultThickness,
+    collapsedIds = new Set<string>(),
+    enabledFamilies,
   } = opts;
 
-  // 1. Build children map
+  // -------- Build children tree --------
   const childrenOf = new Map<string, string[]>();
   for (const l of LANGUAGES) {
     if (l.parent) {
@@ -121,104 +168,147 @@ export function computeLayout(opts: LayoutOptions): LayoutResult {
     }
   }
 
-  function isLeaf(id: string) {
-    return !childrenOf.has(id) || childrenOf.get(id)!.length === 0;
+  // -------- Filter logic --------
+  const familyEnabled = (f: FamilyId) => (enabledFamilies ? enabledFamilies.has(f) : true);
+  function isAncestorCollapsed(id: string): boolean {
+    let cur = LANGUAGE_BY_ID.get(id);
+    while (cur?.parent) {
+      if (collapsedIds.has(cur.parent)) return true;
+      cur = LANGUAGE_BY_ID.get(cur.parent);
+    }
+    return false;
+  }
+  const shown = new Set<string>();
+  for (const l of LANGUAGES) {
+    if (familyEnabled(l.family) && !isAncestorCollapsed(l.id)) shown.add(l.id);
+  }
+  function isVisibleLeaf(id: string): boolean {
+    if (!shown.has(id)) return false;
+    if (collapsedIds.has(id)) return true;
+    const kids = childrenOf.get(id) ?? [];
+    return !kids.some((k) => shown.has(k));
+  }
+  const visibleLeaves = LANGUAGES.filter((l) => isVisibleLeaf(l.id));
+  if (visibleLeaves.length === 0) {
+    return {
+      ribbons: [],
+      totalHeight: marginTop + marginBottom + 200,
+      visibleLeafCount: 0,
+      collapsedCount: collapsedIds.size,
+      meanRibbonThickness: 0,
+    };
+  }
+  const sortKey = (l: LanguageNode) =>
+    FAMILY_ORDER.indexOf(l.family) * 1000 +
+    (BRANCH_ORDER[l.branch ?? ""] ?? 99) * 10 +
+    l.geo.lon / 360;
+  visibleLeaves.sort((a, b) => sortKey(a) - sortKey(b));
+
+  // -------- v5: 计算 peakThickness 给每个 visibleLeaf --------
+  const peakThick = new Map<string, number>();
+  for (const leaf of visibleLeaves) {
+    let m = 0;
+    const died = leaf.died ?? 2026;
+    // sample every 100y
+    for (let y = leaf.born; y <= died; y += 100) {
+      const t = thickness(speakerAt(leaf, y));
+      if (t > m) m = t;
+    }
+    // 包含 2025 / final
+    const final = thickness(speakerAt(leaf, died));
+    if (final > m) m = final;
+    peakThick.set(leaf.id, Math.max(TH_MIN, m));
   }
 
-  const leaves = LANGUAGES.filter((l) => isLeaf(l.id));
-
-  // 2. 排序：语系 → 分支 → 经度
-  const sortKey = (l: LanguageNode): number => {
-    const fOrder = FAMILY_ORDER.indexOf(l.family);
-    const bOrder = BRANCH_ORDER[l.branch ?? ""] ?? 99;
-    return fOrder * 1000 + bOrder * 10 + l.geo.lon / 360;
-  };
-  leaves.sort((a, b) => sortKey(a) - sortKey(b));
-
-  // 3. 给每个 leaf 计算「车道高度」 = 峰值厚度 + gap
-  const laneHeight = new Map<string, number>();
-  for (const leaf of leaves) {
-    const peak = Math.max(
-      speakerAt(leaf, 2025),
-      speakerAt(leaf, leaf.died ?? 2025),
-      ...(leaf.speakers ?? []).map((s) => s.count),
-      1
-    );
-    const min = leaf.status === "living" ? minThickLiving : minThickHistorical;
-    const h = Math.max(min, thickness(peak));
-    laneHeight.set(leaf.id, h + laneGap);
-  }
-
-  // 4. 垂直堆叠 — 语系之间额外 gap
-  const FAMILY_BREAK_GAP = 48;   // v3: 8 → 48（语系之间留出明显分隔）
+  // -------- v5: 恒定 gap 堆叠 --------
   const yOf = new Map<string, number>();
   let acc = marginTop;
   let prevFamily: FamilyId | null = null;
-  for (const leaf of leaves) {
-    if (prevFamily && prevFamily !== leaf.family) acc += FAMILY_BREAK_GAP;
-    const h = laneHeight.get(leaf.id)!;
-    yOf.set(leaf.id, acc + h / 2);
-    acc += h;
+  for (const leaf of visibleLeaves) {
+    if (prevFamily !== null && prevFamily !== leaf.family) acc += FAMILY_GAP;
+    else if (prevFamily !== null) acc += CONSTANT_GAP;
+    const pt = peakThick.get(leaf.id)!;
+    yOf.set(leaf.id, acc + pt / 2);
+    acc += pt;
     prevFamily = leaf.family;
   }
   const totalHeight = Math.ceil(acc + marginBottom);
 
-  // 5. 内部节点 Y = descendants 加权重心（按 modern speakers）
-  function descLeaves(id: string): LanguageNode[] {
-    if (isLeaf(id)) return [LANGUAGE_BY_ID.get(id)!];
+  // -------- 内部节点 Y 重心 --------
+  function descVisibleLeaves(id: string): LanguageNode[] {
+    if (isVisibleLeaf(id)) return [LANGUAGE_BY_ID.get(id)!];
     const out: LanguageNode[] = [];
-    for (const cid of childrenOf.get(id) ?? []) out.push(...descLeaves(cid));
+    for (const cid of childrenOf.get(id) ?? []) {
+      if (shown.has(cid)) out.push(...descVisibleLeaves(cid));
+    }
     return out;
   }
   for (const l of LANGUAGES) {
-    if (isLeaf(l.id)) continue;
-    const descs = descLeaves(l.id);
-    if (descs.length === 0) { yOf.set(l.id, marginTop + (totalHeight - marginTop - marginBottom) / 2); continue; }
+    if (!shown.has(l.id) || yOf.has(l.id)) continue;
+    const descs = descVisibleLeaves(l.id);
+    if (descs.length === 0) {
+      yOf.set(l.id, marginTop + (totalHeight - marginTop - marginBottom) / 2);
+      continue;
+    }
     let sumY = 0, sumW = 0;
     for (const d of descs) {
-      const finalY = yOf.get(d.id)!;
       const w = Math.log(Math.max(speakerAt(d, 2025), 1) + 1);
-      sumY += finalY * w;
+      sumY += yOf.get(d.id)! * w;
       sumW += w;
     }
     yOf.set(l.id, sumW > 0 ? sumY / sumW : marginTop + totalHeight / 2);
   }
 
-  // 6. 生成 ribbons
-  const STEP = 40;
+  // -------- 生成 ribbons —— 加 noise wave + thickness 变化 --------
+  const STEP = 35;
+  const noiseAmp = (CONSTANT_GAP / 2) * NOISE_AMP_RATIO; // 约 1.4px — 看起来微微弯但不重叠
   const ribbons: LaneRibbon[] = [];
+  let thickSum = 0;
+
   for (const l of LANGUAGES) {
+    if (!shown.has(l.id)) continue;
     const born = l.born;
     const died = l.died ?? 2026;
     const startY = yOf.get(l.id)!;
-    const parentY = l.parent ? (yOf.get(l.parent) ?? startY) : startY;
+    const parentY = l.parent && yOf.has(l.parent) ? yOf.get(l.parent)! : startY;
 
     const isLiving = l.status === "living";
     const isRecon = l.status === "reconstructed";
-    const minW = isLiving ? 4 : isRecon ? 1.5 : 2;
+    const minW = isRecon ? 1.2 : isLiving ? 3 : 2;
+    const phaseY = phase(l.id, "y");
+    const phaseT = phase(l.id, "t");
 
     const samples: { year: number; y: number; w: number }[] = [];
-    const TRANSITION = Math.min(200, Math.max(80, (died - born) * 0.06));
+    const TRANSITION = Math.min(220, Math.max(80, (died - born) * 0.06));
 
     for (let y = born; y <= died; y += STEP) {
+      // smooth merge from parent
       let cy = startY;
-      if (l.parent && y < born + TRANSITION) {
+      if (l.parent && yOf.has(l.parent) && y < born + TRANSITION) {
         const t = (y - born) / TRANSITION;
         const ts = 0.5 - 0.5 * Math.cos(Math.PI * t);
         cy = parentY + (startY - parentY) * ts;
       }
+
+      // v5: noise wave on centerline
+      // amplitude 在两端 taper 到 0，避免和父/子接缝突兀
+      let ampFactor = 1;
+      if (y < born + TRANSITION) ampFactor = (y - born) / TRANSITION;
+      if (l.died && y > died - TRANSITION) ampFactor = (died - y) / TRANSITION;
+      ampFactor = Math.max(0, Math.min(1, ampFactor));
+      cy += Math.sin(y * NOISE_FREQ_CENTER + phaseY) * noiseAmp * ampFactor;
+
+      // base thickness
       const count = speakerAt(l, y);
       let w = Math.max(minW, thickness(count));
-      // taper start
-      if (y < born + TRANSITION) {
-        const t = (y - born) / TRANSITION;
-        w *= Math.max(0.05, t);
-      }
-      // taper end (only for died / extinct)
-      if (l.died && y > died - TRANSITION) {
-        const t = (died - y) / TRANSITION;
-        w *= Math.max(0.05, t);
-      }
+
+      // v5: noise thickness 微胖瘦
+      w *= 1 + Math.sin(y * NOISE_FREQ_THICK + phaseT) * NOISE_THICK_PCT * ampFactor;
+
+      // taper birth/death
+      if (y < born + TRANSITION) w *= Math.max(0.05, (y - born) / TRANSITION);
+      if (l.died && y > died - TRANSITION) w *= Math.max(0.05, (died - y) / TRANSITION);
+
       samples.push({ year: y, y: cy, w });
     }
     if (samples.length === 0 || samples[samples.length - 1].year < died) {
@@ -228,7 +318,7 @@ export function computeLayout(opts: LayoutOptions): LayoutResult {
       samples.push({ year: died, y: cy, w });
     }
 
-    // build path
+    // SVG path: top edge forward + bot edge backward
     const top: [number, number][] = samples.map((s) => [xScale(s.year), s.y - s.w / 2]);
     const bot: [number, number][] = samples.map((s) => [xScale(s.year), s.y + s.w / 2]);
 
@@ -250,13 +340,26 @@ export function computeLayout(opts: LayoutOptions): LayoutResult {
 
     let centerPath = `M ${xScale(samples[0].year)},${samples[0].y} `;
     for (let i = 1; i < samples.length; i++) {
-      const ps = samples[i - 1];
-      const s = samples[i];
+      const ps = samples[i - 1], s = samples[i];
       const px = xScale(ps.year), py = ps.y;
       const x = xScale(s.year), y = s.y;
       const cx = (px + x) / 2;
       centerPath += `C ${cx},${py} ${cx},${y} ${x},${y} `;
     }
+
+    const kids = childrenOf.get(l.id) ?? [];
+    const collapsible = kids.length > 0;
+    const collapsed = collapsedIds.has(l.id);
+
+    function countAllDesc(id: string): number {
+      const k = childrenOf.get(id) ?? [];
+      let n = k.length;
+      for (const cid of k) n += countAllDesc(cid);
+      return n;
+    }
+
+    const peak = peakThick.get(l.id) ?? Math.max(...samples.map((s) => s.w));
+    thickSum += peak;
 
     ribbons.push({
       id: l.id,
@@ -272,15 +375,18 @@ export function computeLayout(opts: LayoutOptions): LayoutResult {
       yEnd: startY,
       parent: l.parent,
       modernThickness: samples[samples.length - 1].w,
+      peakThickness: peak,
+      collapsible,
+      collapsed,
+      descendantCount: countAllDesc(l.id),
     });
   }
 
-  return { ribbons, totalHeight };
-}
-
-// 默认厚度函数：log10 scale
-export function defaultThickness(speakers: number): number {
-  const v = Math.log10(Math.max(speakers, 100));
-  // log10(100)=2 → 0.6;  log10(1.5B)=9.18 → ~32
-  return Math.max(0.6, (v - 2) * 4.5);
+  return {
+    ribbons,
+    totalHeight,
+    visibleLeafCount: visibleLeaves.length,
+    collapsedCount: collapsedIds.size,
+    meanRibbonThickness: ribbons.length > 0 ? thickSum / ribbons.length : 0,
+  };
 }

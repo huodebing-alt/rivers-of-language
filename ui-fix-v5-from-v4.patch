@@ -1,0 +1,886 @@
+--- a/lib/layout.ts
++++ b/lib/layout.ts
+@@ -1,16 +1,17 @@
+ /**
+- * 河流布局算法 v4 — 增加 collapsedIds + enabledFamilies 过滤
++ * 河流布局算法 v5
+  *
+- * v4 改动：
+- *  - 接受 `collapsedIds: Set<string>` —— 该节点的所有 descendants 隐藏，本节点变成 visible leaf
+- *  - 接受 `enabledFamilies: Set<FamilyId>` —— 整个语系隐藏
+- *  - totalHeight 根据 visible leaves 动态计算（filter 后变小）
+- *  - 返回 `collapsibleNodes` —— shown 节点中有 visible children 的，给 UI 渲染三角图标
++ * v5 关键改动：
++ *  1. 厚度：log scale，强对比 — minTh=4, maxTh=70 px；英语视觉压倒性粗
++ *  2. 堆叠：按 peak thickness + 恒定 gap（语言间 8px / 语系间 36px），ribbon 边缘等距
++ *  3. centerline 加低频 sinusoidal noise — 每条河独立 phase 看像真河流
++ *  4. thickness 加微 noise — 让河流有自然胖瘦变化
++ *  5. ribbon 边缘 noise 不会越过相邻 ribbon（amplitude < gap/2）
+  *
+- * 保留 v3：
+- *  - 每个 leaf 按峰值厚度 + 22/16 min lane + 18 laneGap + 48 familyGap
+- *  - ribbon 厚度按使用人数算（不变）
+- *  - X 轴分段线性，6 段
++ * 保留 v4：
++ *  - collapsedIds + enabledFamilies 过滤
++ *  - 动态 totalHeight
++ *  - X 轴分段线性
+  */
+ 
+ import { LANGUAGES, LANGUAGE_BY_ID, speakerAt } from "./data";
+@@ -30,21 +31,18 @@
+   yEnd: number;
+   parent?: string;
+   modernThickness: number;
+-  /** 是否可折叠（shown 且有 visible children） */
++  peakThickness: number;
+   collapsible: boolean;
+-  /** 当前是否被折叠 */
+   collapsed: boolean;
+-  /** descendants 数（仅 visible） */
+   descendantCount: number;
+ }
+ 
+ export interface LayoutResult {
+   ribbons: LaneRibbon[];
+   totalHeight: number;
+-  /** 当前 visible leaf 数 */
+   visibleLeafCount: number;
+-  /** 当前 collapsed 数 */
+   collapsedCount: number;
++  meanRibbonThickness: number;
+ }
+ 
+ export interface LayoutOptions {
+@@ -54,14 +52,44 @@
+   marginTop: number;
+   marginBottom: number;
+   xScale: (year: number) => number;
+-  thickness: (speakers: number) => number;
++  thickness?: (speakers: number) => number;
+   collapsedIds?: Set<string>;
+   enabledFamilies?: Set<FamilyId>;
+-  minThickLiving?: number;
+-  minThickHistorical?: number;
+-  laneGap?: number;
+ }
+ 
++// =================== v5 thickness ===================
++// log scale 强对比版
++const TH_MIN = 4;
++const TH_MAX = 70;
++const TH_LOG_MIN = Math.log10(100);     // 100 speakers = 4px
++const TH_LOG_MAX = Math.log10(2e9);     // 2B speakers = 70px
++
++export function defaultThickness(speakers: number): number {
++  const s = Math.max(speakers, 100);
++  const v = Math.log10(s);
++  const t = Math.max(0, Math.min(1, (v - TH_LOG_MIN) / (TH_LOG_MAX - TH_LOG_MIN)));
++  return TH_MIN + (TH_MAX - TH_MIN) * t;
++}
++
++// =================== v5 gap constants ===================
++const CONSTANT_GAP = 8;      // ribbon 边缘之间恒定空白
++const FAMILY_GAP = 36;       // 语系之间额外空白
++const NOISE_FREQ_CENTER = 0.0008;    // 中心线波浪频率 (~2 个波 over 8000y)
++const NOISE_FREQ_THICK  = 0.0015;
++const NOISE_AMP_RATIO   = 0.35;      // amplitude 不超 gap/2 的 35%
++const NOISE_THICK_PCT   = 0.10;      // 厚度波动 ±10%
++
++// 简易确定性 hash → 给每条河独立 phase
++function hashStr(s: string): number {
++  let h = 0;
++  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
++  return Math.abs(h);
++}
++function phase(id: string, salt: string = ""): number {
++  return ((hashStr(id + salt) % 10000) / 10000) * Math.PI * 2;
++}
++
++// =================== X 轴 ===================
+ const SEGMENTS: [number, number, number][] = [
+   [-6500, -2500, 0.18],
+   [-2500, -200,  0.22],
+@@ -74,22 +102,22 @@
+ export function makeXScale(width: number, marginLeft: number, marginRight: number) {
+   const usable = width - marginLeft - marginRight;
+   let acc = marginLeft;
+-  const breakpoints: { y0: number; y1: number; x0: number; x1: number }[] = [];
++  const bps: { y0: number; y1: number; x0: number; x1: number }[] = [];
+   for (const [y0, y1, frac] of SEGMENTS) {
+     const w = usable * frac;
+-    breakpoints.push({ y0, y1, x0: acc, x1: acc + w });
++    bps.push({ y0, y1, x0: acc, x1: acc + w });
+     acc += w;
+   }
+   return (year: number) => {
+-    if (year <= breakpoints[0].y0) return breakpoints[0].x0;
+-    if (year >= breakpoints[breakpoints.length - 1].y1) return breakpoints[breakpoints.length - 1].x1;
+-    for (const bp of breakpoints) {
++    if (year <= bps[0].y0) return bps[0].x0;
++    if (year >= bps[bps.length - 1].y1) return bps[bps.length - 1].x1;
++    for (const bp of bps) {
+       if (year >= bp.y0 && year <= bp.y1) {
+         const t = (year - bp.y0) / (bp.y1 - bp.y0);
+         return bp.x0 + t * (bp.x1 - bp.x0);
+       }
+     }
+-    return breakpoints[breakpoints.length - 1].x1;
++    return bps[bps.length - 1].x1;
+   };
+ }
+ 
+@@ -126,17 +154,12 @@
+     marginTop,
+     marginBottom,
+     xScale,
+-    thickness,
++    thickness = defaultThickness,
+     collapsedIds = new Set<string>(),
+     enabledFamilies,
+-    minThickLiving = 22,
+-    minThickHistorical = 16,
+-    laneGap = 18,
+   } = opts;
+ 
+-  const FAMILY_BREAK_GAP = 48;
+-
+-  // Build children map
++  // -------- Build children tree --------
+   const childrenOf = new Map<string, string[]>();
+   for (const l of LANGUAGES) {
+     if (l.parent) {
+@@ -145,11 +168,8 @@
+     }
+   }
+ 
+-  // --- v4: filter logic ---
+-  function familyEnabled(f: FamilyId): boolean {
+-    return enabledFamilies ? enabledFamilies.has(f) : true;
+-  }
+-
++  // -------- Filter logic --------
++  const familyEnabled = (f: FamilyId) => (enabledFamilies ? enabledFamilies.has(f) : true);
+   function isAncestorCollapsed(id: string): boolean {
+     let cur = LANGUAGE_BY_ID.get(id);
+     while (cur?.parent) {
+@@ -158,63 +178,63 @@
+     }
+     return false;
+   }
+-
+-  // shown = family enabled AND no ancestor is collapsed
+   const shown = new Set<string>();
+   for (const l of LANGUAGES) {
+-    if (familyEnabled(l.family) && !isAncestorCollapsed(l.id)) {
+-      shown.add(l.id);
+-    }
++    if (familyEnabled(l.family) && !isAncestorCollapsed(l.id)) shown.add(l.id);
+   }
+-
+-  // visible leaf: shown AND (collapsed itself OR no shown children)
+   function isVisibleLeaf(id: string): boolean {
+     if (!shown.has(id)) return false;
+     if (collapsedIds.has(id)) return true;
+     const kids = childrenOf.get(id) ?? [];
+     return !kids.some((k) => shown.has(k));
+   }
+-
+   const visibleLeaves = LANGUAGES.filter((l) => isVisibleLeaf(l.id));
+   if (visibleLeaves.length === 0) {
+-    return { ribbons: [], totalHeight: marginTop + marginBottom + 200, visibleLeafCount: 0, collapsedCount: collapsedIds.size };
+-  }
+-
+-  const sortKey = (l: LanguageNode): number => {
+-    const fOrder = FAMILY_ORDER.indexOf(l.family);
+-    const bOrder = BRANCH_ORDER[l.branch ?? ""] ?? 99;
+-    return fOrder * 1000 + bOrder * 10 + l.geo.lon / 360;
+-  };
++    return {
++      ribbons: [],
++      totalHeight: marginTop + marginBottom + 200,
++      visibleLeafCount: 0,
++      collapsedCount: collapsedIds.size,
++      meanRibbonThickness: 0,
++    };
++  }
++  const sortKey = (l: LanguageNode) =>
++    FAMILY_ORDER.indexOf(l.family) * 1000 +
++    (BRANCH_ORDER[l.branch ?? ""] ?? 99) * 10 +
++    l.geo.lon / 360;
+   visibleLeaves.sort((a, b) => sortKey(a) - sortKey(b));
+ 
+-  // Lane heights — only for visible leaves
+-  const laneHeight = new Map<string, number>();
++  // -------- v5: 计算 peakThickness 给每个 visibleLeaf --------
++  const peakThick = new Map<string, number>();
+   for (const leaf of visibleLeaves) {
+-    const peak = Math.max(
+-      speakerAt(leaf, 2025),
+-      speakerAt(leaf, leaf.died ?? 2025),
+-      ...(leaf.speakers ?? []).map((s) => s.count),
+-      1
+-    );
+-    const min = leaf.status === "living" ? minThickLiving : minThickHistorical;
+-    const h = Math.max(min, thickness(peak));
+-    laneHeight.set(leaf.id, h + laneGap);
++    let m = 0;
++    const died = leaf.died ?? 2026;
++    // sample every 100y
++    for (let y = leaf.born; y <= died; y += 100) {
++      const t = thickness(speakerAt(leaf, y));
++      if (t > m) m = t;
++    }
++    // 包含 2025 / final
++    const final = thickness(speakerAt(leaf, died));
++    if (final > m) m = final;
++    peakThick.set(leaf.id, Math.max(TH_MIN, m));
+   }
+ 
+-  // Stack vertically
++  // -------- v5: 恒定 gap 堆叠 --------
+   const yOf = new Map<string, number>();
+   let acc = marginTop;
+   let prevFamily: FamilyId | null = null;
+   for (const leaf of visibleLeaves) {
+-    if (prevFamily && prevFamily !== leaf.family) acc += FAMILY_BREAK_GAP;
+-    const h = laneHeight.get(leaf.id)!;
+-    yOf.set(leaf.id, acc + h / 2);
+-    acc += h;
++    if (prevFamily !== null && prevFamily !== leaf.family) acc += FAMILY_GAP;
++    else if (prevFamily !== null) acc += CONSTANT_GAP;
++    const pt = peakThick.get(leaf.id)!;
++    yOf.set(leaf.id, acc + pt / 2);
++    acc += pt;
+     prevFamily = leaf.family;
+   }
+   const totalHeight = Math.ceil(acc + marginBottom);
+ 
+-  // Internal shown nodes: Y = weighted centroid of visible descendants
++  // -------- 内部节点 Y 重心 --------
+   function descVisibleLeaves(id: string): LanguageNode[] {
+     if (isVisibleLeaf(id)) return [LANGUAGE_BY_ID.get(id)!];
+     const out: LanguageNode[] = [];
+@@ -223,10 +243,8 @@
+     }
+     return out;
+   }
+-
+   for (const l of LANGUAGES) {
+-    if (!shown.has(l.id)) continue;
+-    if (yOf.has(l.id)) continue; // it's a visible leaf, Y already set
++    if (!shown.has(l.id) || yOf.has(l.id)) continue;
+     const descs = descVisibleLeaves(l.id);
+     if (descs.length === 0) {
+       yOf.set(l.id, marginTop + (totalHeight - marginTop - marginBottom) / 2);
+@@ -241,9 +259,12 @@
+     yOf.set(l.id, sumW > 0 ? sumY / sumW : marginTop + totalHeight / 2);
+   }
+ 
+-  // Generate ribbons — only for shown nodes
+-  const STEP = 40;
++  // -------- 生成 ribbons —— 加 noise wave + thickness 变化 --------
++  const STEP = 35;
++  const noiseAmp = (CONSTANT_GAP / 2) * NOISE_AMP_RATIO; // 约 1.4px — 看起来微微弯但不重叠
+   const ribbons: LaneRibbon[] = [];
++  let thickSum = 0;
++
+   for (const l of LANGUAGES) {
+     if (!shown.has(l.id)) continue;
+     const born = l.born;
+@@ -253,28 +274,41 @@
+ 
+     const isLiving = l.status === "living";
+     const isRecon = l.status === "reconstructed";
+-    const minW = isLiving ? 4 : isRecon ? 1.5 : 2;
++    const minW = isRecon ? 1.2 : isLiving ? 3 : 2;
++    const phaseY = phase(l.id, "y");
++    const phaseT = phase(l.id, "t");
+ 
+     const samples: { year: number; y: number; w: number }[] = [];
+-    const TRANSITION = Math.min(200, Math.max(80, (died - born) * 0.06));
++    const TRANSITION = Math.min(220, Math.max(80, (died - born) * 0.06));
+ 
+     for (let y = born; y <= died; y += STEP) {
++      // smooth merge from parent
+       let cy = startY;
+       if (l.parent && yOf.has(l.parent) && y < born + TRANSITION) {
+         const t = (y - born) / TRANSITION;
+         const ts = 0.5 - 0.5 * Math.cos(Math.PI * t);
+         cy = parentY + (startY - parentY) * ts;
+       }
++
++      // v5: noise wave on centerline
++      // amplitude 在两端 taper 到 0，避免和父/子接缝突兀
++      let ampFactor = 1;
++      if (y < born + TRANSITION) ampFactor = (y - born) / TRANSITION;
++      if (l.died && y > died - TRANSITION) ampFactor = (died - y) / TRANSITION;
++      ampFactor = Math.max(0, Math.min(1, ampFactor));
++      cy += Math.sin(y * NOISE_FREQ_CENTER + phaseY) * noiseAmp * ampFactor;
++
++      // base thickness
+       const count = speakerAt(l, y);
+       let w = Math.max(minW, thickness(count));
+-      if (y < born + TRANSITION) {
+-        const t = (y - born) / TRANSITION;
+-        w *= Math.max(0.05, t);
+-      }
+-      if (l.died && y > died - TRANSITION) {
+-        const t = (died - y) / TRANSITION;
+-        w *= Math.max(0.05, t);
+-      }
++
++      // v5: noise thickness 微胖瘦
++      w *= 1 + Math.sin(y * NOISE_FREQ_THICK + phaseT) * NOISE_THICK_PCT * ampFactor;
++
++      // taper birth/death
++      if (y < born + TRANSITION) w *= Math.max(0.05, (y - born) / TRANSITION);
++      if (l.died && y > died - TRANSITION) w *= Math.max(0.05, (died - y) / TRANSITION);
++
+       samples.push({ year: y, y: cy, w });
+     }
+     if (samples.length === 0 || samples[samples.length - 1].year < died) {
+@@ -284,6 +318,7 @@
+       samples.push({ year: died, y: cy, w });
+     }
+ 
++    // SVG path: top edge forward + bot edge backward
+     const top: [number, number][] = samples.map((s) => [xScale(s.year), s.y - s.w / 2]);
+     const bot: [number, number][] = samples.map((s) => [xScale(s.year), s.y + s.w / 2]);
+ 
+@@ -305,20 +340,17 @@
+ 
+     let centerPath = `M ${xScale(samples[0].year)},${samples[0].y} `;
+     for (let i = 1; i < samples.length; i++) {
+-      const ps = samples[i - 1];
+-      const s = samples[i];
++      const ps = samples[i - 1], s = samples[i];
+       const px = xScale(ps.year), py = ps.y;
+       const x = xScale(s.year), y = s.y;
+       const cx = (px + x) / 2;
+       centerPath += `C ${cx},${py} ${cx},${y} ${x},${y} `;
+     }
+ 
+-    // collapsible: 节点有 children 且至少一个 child 在 shown 集合
+     const kids = childrenOf.get(l.id) ?? [];
+     const collapsible = kids.length > 0;
+     const collapsed = collapsedIds.has(l.id);
+ 
+-    // descendants count（只计 visible 路径 — 若 collapsed，count = 全部后代）
+     function countAllDesc(id: string): number {
+       const k = childrenOf.get(id) ?? [];
+       let n = k.length;
+@@ -326,6 +358,9 @@
+       return n;
+     }
+ 
++    const peak = peakThick.get(l.id) ?? Math.max(...samples.map((s) => s.w));
++    thickSum += peak;
++
+     ribbons.push({
+       id: l.id,
+       name: l.name,
+@@ -340,6 +375,7 @@
+       yEnd: startY,
+       parent: l.parent,
+       modernThickness: samples[samples.length - 1].w,
++      peakThickness: peak,
+       collapsible,
+       collapsed,
+       descendantCount: countAllDesc(l.id),
+@@ -351,10 +387,6 @@
+     totalHeight,
+     visibleLeafCount: visibleLeaves.length,
+     collapsedCount: collapsedIds.size,
++    meanRibbonThickness: ribbons.length > 0 ? thickSum / ribbons.length : 0,
+   };
+ }
+-
+-export function defaultThickness(speakers: number): number {
+-  const v = Math.log10(Math.max(speakers, 100));
+-  return Math.max(0.6, (v - 2) * 4.5);
+-}
+--- a/app/components/RiverChart.tsx
++++ b/app/components/RiverChart.tsx
+@@ -13,7 +13,6 @@
+ 
+ interface Props {
+   width: number;
+-  /** Container 高度（用来设 max-height for scroll） */
+   containerHeight: number;
+   isMobile?: boolean;
+   hoveredId: string | null;
+@@ -26,11 +25,10 @@
+   toggleCollapse: (id: string) => void;
+ }
+ 
+-// v3/v4 margins
+ const DESKTOP_MARGIN = { top: 4, right: 200, bottom: 4, left: 220 };
+ const MOBILE_MARGIN  = { top: 4, right: 170, bottom: 4, left: 140 };
+-const HEADER_H = 56;  // sticky top bar
+-const FOOTER_H = 48;  // sticky bottom bar
++const HEADER_H = 56;
++const FOOTER_H = 48;
+ 
+ function splitLongName(name: string, max = 6): string[] {
+   if (name.length <= max) return [name];
+@@ -59,7 +57,7 @@
+     [width, MARGIN.left, MARGIN.right]
+   );
+ 
+-  const { ribbons, totalHeight, visibleLeafCount, collapsedCount } = useMemo(
++  const { ribbons, totalHeight, visibleLeafCount, collapsedCount, meanRibbonThickness } = useMemo(
+     () =>
+       computeLayout({
+         width,
+@@ -77,12 +75,14 @@
+ 
+   if (typeof window !== "undefined") {
+     (window as any).__riverLayout = {
+-      version: "v4",
++      version: "v5",
+       width,
+       totalHeight,
+       ribbonCount: ribbons.length,
+       visibleLeafCount,
+       collapsedCount,
++      meanRibbonThickness: Math.round(meanRibbonThickness * 10) / 10,
++      mapProjection: "equirectangular (d3-geo)",
+       MARGIN,
+     };
+   }
+@@ -118,7 +118,13 @@
+     return FAMILY_META[f].color;
+   }
+ 
+-  // Scroll-area height (container - header - footer)
++  // v5: 单击 = toggle collapse + sticky select
++  function onRibbonClick(r: LaneRibbon, e: React.MouseEvent) {
++    e.stopPropagation();
++    setSelectedId(r.id);
++    if (r.collapsible) toggleCollapse(r.id);
++  }
++
+   const scrollMaxH = Math.max(120, containerHeight - HEADER_H - FOOTER_H);
+ 
+   return (
+@@ -126,7 +132,7 @@
+       className="w-full h-full flex flex-col bg-cream-50"
+       style={{ minWidth: width, height: containerHeight }}
+     >
+-      {/* ============ STICKY TOP: Title + Events ============ */}
++      {/* ============ STICKY TOP ============ */}
+       <div
+         className="shrink-0 bg-cream-50 border-b border-cream-200"
+         style={{ width, height: HEADER_H, position: "sticky", top: 0, zIndex: 30 }}
+@@ -173,14 +179,10 @@
+         </svg>
+       </div>
+ 
+-      {/* ============ MIDDLE: Scrollable ribbons SVG ============ */}
++      {/* ============ MIDDLE: scrollable ============ */}
+       <div
+-        className="overflow-y-auto overflow-x-hidden"
+-        style={{
+-          width,
+-          maxHeight: scrollMaxH,
+-          transition: "max-height 280ms ease",
+-        }}
++        className="overflow-y-auto overflow-x-hidden river-scroll"
++        style={{ width, maxHeight: scrollMaxH, transition: "max-height 280ms ease" }}
+       >
+         <svg
+           width={width}
+@@ -198,9 +200,15 @@
+                 <stop offset="1" stopColor={meta.color} stopOpacity="0.9" />
+               </linearGradient>
+             ))}
++            {/* v5: 流水高光 — 单条 ribbon hover 时叠加 */}
++            <linearGradient id="flow-shine" x1="0" y1="0" x2="1" y2="0">
++              <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0" />
++              <stop offset="50%" stopColor="#FFFFFF" stopOpacity="0.55" />
++              <stop offset="100%" stopColor="#FFFFFF" stopOpacity="0" />
++            </linearGradient>
+           </defs>
+ 
+-          {/* 时间事件竖线（贯穿整个 ribbon 区） */}
++          {/* 事件竖线（贯穿） */}
+           <g className="event-lines">
+             {EVENTS.map((e) => (
+               <line
+@@ -217,7 +225,7 @@
+             ))}
+           </g>
+ 
+-          {/* 河流底色 */}
++          {/* 底色 */}
+           <rect
+             x={MARGIN.left}
+             y={0}
+@@ -232,27 +240,43 @@
+               const isFocus = !focusIds || focusIds.has(r.id);
+               const isReconstructed = r.status === "reconstructed";
+               const isExtinct = r.status === "extinct" || r.status === "historical";
++              const isHighlighted = hoveredId === r.id || selectedId === r.id;
+               return (
+-                <path
+-                  key={r.id}
+-                  d={r.path}
+-                  className={`river cursor-pointer ${isFocus ? "" : "river-dim"} ${
+-                    hoveredId === r.id || selectedId === r.id ? "river-highlight" : ""
+-                  }`}
+-                  fill={`url(#grad-${r.family})`}
+-                  opacity={isReconstructed ? 0.45 : isExtinct ? 0.72 : 0.92}
+-                  stroke={familyColor(r.family)}
+-                  strokeWidth={selectedId === r.id ? 1.6 : 0.4}
+-                  strokeOpacity={0.5}
+-                  strokeDasharray={isReconstructed ? "3 3" : undefined}
+-                  onMouseEnter={() => setHoveredId(r.id)}
+-                  onMouseLeave={() => setHoveredId(null)}
+-                  onClick={() => setSelectedId(selectedId === r.id ? null : r.id)}
+-                >
+-                  <title>
+-                    {r.name.zh} · {r.name.en}
+-                  </title>
+-                </path>
++                <g key={r.id}>
++                  <path
++                    d={r.path}
++                    className={`river cursor-pointer ${isFocus ? "" : "river-dim"}`}
++                    fill={`url(#grad-${r.family})`}
++                    opacity={isReconstructed ? 0.45 : isExtinct ? 0.72 : 0.92}
++                    stroke={familyColor(r.family)}
++                    strokeWidth={isHighlighted ? 1.6 : 0.4}
++                    strokeOpacity={0.55}
++                    strokeDasharray={isReconstructed ? "3 3" : undefined}
++                    onMouseEnter={() => setHoveredId(r.id)}
++                    onMouseLeave={() => setHoveredId(null)}
++                    onClick={(e) => onRibbonClick(r, e)}
++                  >
++                    <title>
++                      {r.name.zh} · {r.name.en}
++                      {r.collapsible ? (r.collapsed ? "  [click to expand]" : "  [click to collapse]") : ""}
++                    </title>
++                  </path>
++
++                  {/* v5: hover/selected 流水高光 — center line stroke with moving dashes */}
++                  {isHighlighted && (
++                    <path
++                      d={r.centerPath}
++                      fill="none"
++                      stroke="white"
++                      strokeOpacity={0.85}
++                      strokeWidth={Math.max(6, r.peakThickness * 0.55)}
++                      strokeLinecap="round"
++                      strokeDasharray="22 80"
++                      className="river-flow"
++                      pointerEvents="none"
++                    />
++                  )}
++                </g>
+               );
+             })}
+           </g>
+@@ -284,40 +308,6 @@
+             </g>
+           )}
+ 
+-          {/* Collapse / Expand 三角图标 */}
+-          <g className="collapsers">
+-            {ribbons.map((r) => {
+-              if (!r.collapsible) return null;
+-              const cx = xScale(r.born) - 10;
+-              const cy = r.yStart;
+-              const collapsed = r.collapsed;
+-              const isHover = hoveredId === r.id;
+-              return (
+-                <g
+-                  key={`c-${r.id}`}
+-                  transform={`translate(${cx}, ${cy})`}
+-                  onClick={(e) => {
+-                    e.stopPropagation();
+-                    toggleCollapse(r.id);
+-                  }}
+-                  className="cursor-pointer"
+-                  style={{ pointerEvents: "auto" }}
+-                >
+-                  <title>
+-                    {collapsed ? "展开 / Expand" : "折叠 / Collapse"} — {r.descendantCount} descendants
+-                  </title>
+-                  <circle r={7.5} fill="#FBF8F1" stroke={familyColor(r.family)} strokeWidth={1.2} opacity={isHover ? 1 : 0.85} />
+-                  {/* 三角：展开 ▼ 折叠 ▶ */}
+-                  {collapsed ? (
+-                    <path d="M -2.2 -3.4 L 3.2 0 L -2.2 3.4 Z" fill={familyColor(r.family)} />
+-                  ) : (
+-                    <path d="M -3.4 -2.2 L 0 3.2 L 3.4 -2.2 Z" fill={familyColor(r.family)} />
+-                  )}
+-                </g>
+-              );
+-            })}
+-          </g>
+-
+           {/* 语言标签 */}
+           <g className="labels">
+             {ribbons.map((r) => {
+@@ -336,6 +326,7 @@
+                     pointerEvents="none"
+                   >
+                     * {r.name.zh}
++                    {r.collapsed && <tspan fill="#A8853C" fontSize={9} dx={4}>+{r.descendantCount}</tspan>}
+                   </text>
+                 );
+               }
+@@ -357,7 +348,6 @@
+                   </text>
+                 );
+               }
+-              // living OR collapsed (treated as leaf — show on right)
+               const lines = isMobile ? splitLongName(r.name.zh, 6) : [r.name.zh];
+               const isHighlighted = hoveredId === r.id || selectedId === r.id;
+               return (
+@@ -451,30 +441,16 @@
+         </svg>
+       </div>
+ 
+-      {/* ============ STICKY BOTTOM: Time axis ============ */}
++      {/* ============ STICKY BOTTOM ============ */}
+       <div
+         className="shrink-0 bg-cream-50 border-t border-cream-200"
+         style={{ width, height: FOOTER_H, position: "sticky", bottom: 0, zIndex: 30 }}
+       >
+         <svg width={width} height={FOOTER_H}>
+-          <line
+-            x1={MARGIN.left}
+-            x2={width - MARGIN.right}
+-            y1={6}
+-            y2={6}
+-            stroke="#5C5247"
+-            strokeWidth={0.6}
+-          />
++          <line x1={MARGIN.left} x2={width - MARGIN.right} y1={6} y2={6} stroke="#5C5247" strokeWidth={0.6} />
+           {X_TICKS.map((y) => (
+             <g key={y}>
+-              <line
+-                x1={xScale(y)}
+-                x2={xScale(y)}
+-                y1={6}
+-                y2={11}
+-                stroke="#5C5247"
+-                strokeWidth={0.6}
+-              />
++              <line x1={xScale(y)} x2={xScale(y)} y1={6} y2={11} stroke="#5C5247" strokeWidth={0.6} />
+               <text
+                 x={xScale(y)}
+                 y={26}
+@@ -487,7 +463,6 @@
+               </text>
+             </g>
+           ))}
+-          {/* 提示：可滚动 + 折叠提示 */}
+           <text
+             x={width / 2}
+             y={FOOTER_H - 4}
+@@ -497,7 +472,7 @@
+             fill="#A8853C"
+             opacity={0.7}
+           >
+-            点击语支左端 ▼ 折叠后代 · Click ▼ at branch start to collapse · 滚动查看完整族谱
++            点击任意河流 = 折叠/展开后代 · Click any river to collapse/expand · 鼠标悬停看详情
+           </text>
+         </svg>
+       </div>
+--- a/app/components/MiniMap.tsx
++++ b/app/components/MiniMap.tsx
+@@ -1,63 +1,86 @@
+ "use client";
+-import { useMemo } from "react";
+-import * as d3 from "d3";
+-import { LANGUAGE_BY_ID } from "@/lib/data";
++import { useEffect, useMemo, useState } from "react";
++import { geoNaturalEarth1, geoPath } from "d3";
++import { feature } from "topojson-client";
++import { LANGUAGE_BY_ID, LANGUAGES } from "@/lib/data";
+ import { FAMILY_META } from "@/lib/types";
+ 
+-// 极简的世界地图 — 用一组国家/大陆的轮廓近似
+-// 为了零外部 GeoJSON 依赖，使用世界主要大陆的圆弧近似
+-const W = 280, H = 180;
++const WIDTH = 300, HEIGHT = 170;
+ 
+ interface Props {
+   highlightId: string | null;
+ }
+ 
+-// 用 Mollweide 投影把 (lat, lon) 投到画布上
+-function project(lat: number, lon: number): [number, number] {
+-  // Equirectangular projection
+-  const x = ((lon + 180) / 360) * W;
+-  const y = ((90 - lat) / 180) * H;
+-  return [x, y];
+-}
++// world-atlas v2 (~110KB gzipped) — fetched from CDN once, cached
++const WORLD_URL = "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json";
+ 
+-// 简化大陆轮廓（粗略椭圆 / 多边形）
+-const CONTINENTS: { name: string; d: string }[] = [
+-  // 欧亚大陆
+-  { name: "Eurasia", d: "M 60,30 Q 120,20 200,32 Q 240,45 250,80 Q 230,95 180,92 Q 130,90 90,80 Q 60,70 60,50 Z" },
+-  // 非洲
+-  { name: "Africa", d: "M 130,75 Q 160,80 165,110 Q 160,140 145,150 Q 130,140 125,110 Q 120,90 130,75 Z" },
+-  // 澳大利亚
+-  { name: "Australia", d: "M 215,125 Q 245,125 245,140 Q 235,150 215,148 Q 205,140 215,125 Z" },
+-  // 北美
+-  { name: "N. America", d: "M 25,40 Q 60,35 70,60 Q 65,80 45,85 Q 25,75 20,60 Q 18,48 25,40 Z" },
+-  // 南美
+-  { name: "S. America", d: "M 55,95 Q 75,95 75,120 Q 70,148 55,150 Q 45,135 48,115 Q 50,100 55,95 Z" },
+-];
++let _worldCache: any | null = null;
+ 
+ export default function MiniMap({ highlightId }: Props) {
+-  const all = LANGUAGE_BY_ID;
+-  const highlight = highlightId ? all.get(highlightId) : null;
++  const [world, setWorld] = useState<any | null>(_worldCache);
++
++  useEffect(() => {
++    if (_worldCache) {
++      setWorld(_worldCache);
++      return;
++    }
++    let cancelled = false;
++    fetch(WORLD_URL)
++      .then((r) => r.json())
++      .then((topo) => {
++        if (cancelled) return;
++        const fc = feature(topo, topo.objects.countries) as any;
++        _worldCache = fc;
++        setWorld(fc);
++      })
++      .catch(() => {
++        // 网络失败：什么都不画（保留 fallback 视觉）
++      });
++    return () => { cancelled = true; };
++  }, []);
++
++  const projection = useMemo(
++    () => geoNaturalEarth1().scale(58).translate([WIDTH / 2, HEIGHT / 2 + 6]),
++    []
++  );
++  const pathGen = useMemo(() => geoPath(projection), [projection]);
++
++  const highlight = highlightId ? LANGUAGE_BY_ID.get(highlightId) : null;
++  const allLangs = useMemo(
++    () => Array.from(LANGUAGE_BY_ID.values()),
++    []
++  );
+ 
+   return (
+-    <svg viewBox={`0 0 ${W} ${H}`} width={W} height={H} className="block">
+-      {/* 大陆轮廓 */}
+-      <g opacity={0.4}>
+-        {CONTINENTS.map((c) => (
+-          <path key={c.name} d={c.d} fill="#E2D3B0" stroke="#A8853C" strokeWidth={0.4} />
++    <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} width={WIDTH} height={HEIGHT} className="block">
++      {/* 海洋背景 */}
++      <rect x={0} y={0} width={WIDTH} height={HEIGHT} fill="#F5EFE2" opacity={0.5} />
++
++      {/* 大陆轮廓（来自 world-atlas v2） */}
++      <g opacity={0.45}>
++        {world?.features.map((country: any, i: number) => (
++          <path
++            key={i}
++            d={pathGen(country) || undefined}
++            fill="#E2D3B0"
++            stroke="#A8853C"
++            strokeWidth={0.3}
++          />
+         ))}
+       </g>
+ 
+-      {/* 所有语言的点（淡色） */}
+-      <g opacity={0.4}>
+-        {Array.from(all.values()).map((l) => {
++      {/* 全部语言点（淡） */}
++      <g opacity={0.55}>
++        {allLangs.map((l) => {
+           if (l.status === "reconstructed") return null;
+-          const [x, y] = project(l.geo.lat, l.geo.lon);
++          const p = projection([l.geo.lon, l.geo.lat]);
++          if (!p) return null;
+           return (
+             <circle
+               key={l.id}
+-              cx={x}
+-              cy={y}
+-              r={0.7}
++              cx={p[0]}
++              cy={p[1]}
++              r={0.9}
+               fill={FAMILY_META[l.family].color}
+             />
+           );
+@@ -66,17 +89,41 @@
+ 
+       {/* 高亮 */}
+       {highlight && (() => {
+-        const [x, y] = project(highlight.geo.lat, highlight.geo.lon);
++        const p = projection([highlight.geo.lon, highlight.geo.lat]);
++        if (!p) return null;
+         return (
+           <g>
+-            <circle cx={x} cy={y} r={8} fill={FAMILY_META[highlight.family].color} opacity={0.25} />
+-            <circle cx={x} cy={y} r={3.2} fill={FAMILY_META[highlight.family].color} stroke="#FBF8F1" strokeWidth={0.6} />
++            <circle cx={p[0]} cy={p[1]} r={11} fill={FAMILY_META[highlight.family].color} opacity={0.22} />
++            <circle cx={p[0]} cy={p[1]} r={5.5} fill={FAMILY_META[highlight.family].color} opacity={0.5} />
++            <circle cx={p[0]} cy={p[1]} r={3} fill={FAMILY_META[highlight.family].color} stroke="#FBF8F1" strokeWidth={0.8} />
++            {/* 名字标签 */}
++            <text
++              x={p[0] + 8}
++              y={p[1] - 2}
++              fontSize={9}
++              fontFamily="'Noto Serif SC', 'Cormorant Garamond', serif"
++              fill={FAMILY_META[highlight.family].color}
++              fontWeight={600}
++            >
++              {highlight.name.zh}
++            </text>
++            <text
++              x={p[0] + 8}
++              y={p[1] + 9}
++              fontSize={8}
++              fontStyle="italic"
++              fontFamily="'Cormorant Garamond', serif"
++              fill={FAMILY_META[highlight.family].color}
++              opacity={0.75}
++            >
++              {highlight.name.en}
++            </text>
+           </g>
+         );
+       })()}
+ 
+       {/* 边框 */}
+-      <rect x={0.5} y={0.5} width={W - 1} height={H - 1} fill="none" stroke="#A8853C" strokeWidth={0.4} opacity={0.4} />
++      <rect x={0.5} y={0.5} width={WIDTH - 1} height={HEIGHT - 1} fill="none" stroke="#A8853C" strokeWidth={0.4} opacity={0.4} />
+     </svg>
+   );
+ }
+--- a/app/globals.css
++++ b/app/globals.css
+@@ -56,6 +56,17 @@
+   to { stroke-dashoffset: -200; }
+ }
+ 
++/* v5: hover / selected ribbon 流水高光 */
++.river-flow {
++  animation: river-flow 2.4s linear infinite;
++  pointer-events: none;
++  mix-blend-mode: overlay;
++}
++@keyframes river-flow {
++  from { stroke-dashoffset: 0; }
++  to { stroke-dashoffset: -204; }
++}
++
+ /* 隐藏滚动条但保持滚动 */
+ .scrollbar-thin::-webkit-scrollbar { width: 4px; }
+ .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(58, 51, 42, 0.2); }
